@@ -45,7 +45,7 @@ while gh release view "$tag" > /dev/null 2>&1; do
   n=$((n + 1))
   tag=$date_tag.$n
 done
-notes="JDK stubs with JSpecify annotations, built from [jspecify/jdk@${JSPECIFY_JDK_SHA:0:12}](https://github.com/jspecify/jdk/commit/$JSPECIFY_JDK_SHA) with Turbine $turbine_version. Each \`jspecify-jdk-stubs-jdk<N>.jar\` declares the API of Java SE release N, as \`javac --release N\` sees it.
+notes="JDK stubs with JSpecify annotations, built from [jspecify/jdk@${JSPECIFY_JDK_SHA:0:12}](https://github.com/jspecify/jdk/commit/$JSPECIFY_JDK_SHA) with Turbine $turbine_version. Each \`jspecify-jdk-stubs-jdk<N>.jar\` declares the API of Java SE release N, as \`javac --release N\` sees it. The jars are licensed under the GNU General Public License, version 2, with the Classpath Exception, as OpenJDK is; each carries the license in \`META-INF/LICENSE\`.
 
 SHA-256 digests, in the format \`shasum -a 256 --check\` reads:
 

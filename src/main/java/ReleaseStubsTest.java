@@ -2,6 +2,7 @@ import static java.lang.classfile.TypeAnnotation.TargetType.CLASS_TYPE_PARAMETER
 import static java.lang.classfile.TypeAnnotation.TargetType.METHOD_RETURN;
 import static java.nio.file.Files.mismatch;
 
+import java.io.IOException;
 import java.lang.classfile.Annotation;
 import java.lang.classfile.AttributedElement;
 import java.lang.classfile.Attributes;
@@ -14,17 +15,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.SortedMap;
 import java.util.TreeSet;
 import java.util.function.Predicate;
+import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
  * Checks the jars that {@code ReleaseStubs.java} writes against the {@code ct.sym} file of the
- * running JDK, which has to be the JDK that wrote them. Reports every failed check, not only the
- * first.
+ * running JDK, which has to be the JDK that wrote them, and against the license files of
+ * jspecify/jdk. Reports every failed check, not only the first.
  */
 public final class ReleaseStubsTest {
   private static final String NULLABLE = "Lorg/jspecify/annotations/Nullable;";
@@ -34,14 +37,16 @@ public final class ReleaseStubsTest {
   private static final List<String> failures = new ArrayList<>();
 
   public static void main(String[] args) throws Exception {
-    if (args.length != 3) {
+    if (args.length != 4) {
       throw new IllegalArgumentException(
-          "Usage: java ReleaseStubsTest.java <stubs-dir> <second-run-stubs-dir> <yyyy-mm-dd>");
+          "Usage: java ReleaseStubsTest.java <stubs-dir> <second-run-stubs-dir> <yyyy-mm-dd>"
+              + " <jspecify-jdk-dir>");
     }
     var stubsDir = Path.of(args[0]);
     var rerunDir = Path.of(args[1]);
     // The date that ReleaseStubs got, so a run past midnight expects the same releases.
     var today = LocalDate.parse(args[2]);
+    var legalDir = Path.of(args[3]);
 
     selectReleases(
         "the day JDK 27 is the newest release", "2026-11-11", List.of(8, 11, 17, 21, 25, 26, 27));
@@ -73,7 +78,9 @@ public final class ReleaseStubsTest {
     try (var ctSymZip = new ZipFile(ctSym.toFile())) {
       var api = ReleaseStubs.indexCtSym(ctSymZip);
       for (int release : releases) {
-        var classes = ReleaseStubs.readClasses(stubsDir.resolve(ReleaseStubs.jarName(release)));
+        var jarPath = stubsDir.resolve(ReleaseStubs.jarName(release));
+        checkLegalFiles(jarPath, legalDir);
+        var classes = ReleaseStubs.readClasses(jarPath);
         for (var entry : classes.entrySet()) {
           ClassModel sig;
           try (var in = ctSymZip.getInputStream(api.get(release).get(entry.getKey()))) {
@@ -96,6 +103,37 @@ public final class ReleaseStubsTest {
         expected,
         ReleaseStubs.selectReleases(LocalDate.parse(date)),
         "selectReleases(" + date + "), " + day);
+  }
+
+  /**
+   * Checks that {@code jarPath} holds the license files of jspecify/jdk, byte for byte, and no
+   * other entries besides classes.
+   */
+  private static void checkLegalFiles(Path jarPath, Path legalDir) throws IOException {
+    var expected = new TreeSet<String>();
+    ReleaseStubs.LEGAL_FILES.forEach(name -> expected.add("META-INF/" + name));
+    var actual = new TreeSet<String>();
+    try (var jar = new ZipFile(jarPath.toFile())) {
+      jar.stream()
+          .map(ZipEntry::getName)
+          .filter(name -> !name.endsWith(".class"))
+          .forEach(actual::add);
+      checkEquals(expected, actual, "Entries other than classes in " + jarPath);
+      for (var name : ReleaseStubs.LEGAL_FILES) {
+        var entry = jar.getEntry("META-INF/" + name);
+        if (entry == null) {
+          continue;
+        }
+        try (var in = jar.getInputStream(entry)) {
+          int offset =
+              Arrays.mismatch(Files.readAllBytes(legalDir.resolve(name)), in.readAllBytes());
+          check(
+              offset == -1,
+              "META-INF/" + name + " in " + jarPath + " differs from " + legalDir.resolve(name)
+                  + " at byte offset " + offset);
+        }
+      }
+    }
   }
 
   /**

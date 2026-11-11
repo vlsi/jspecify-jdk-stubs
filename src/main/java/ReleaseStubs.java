@@ -1,5 +1,6 @@
 import static java.nio.file.Files.createDirectories;
 import static java.nio.file.Files.newOutputStream;
+import static java.nio.file.Files.readAllBytes;
 import static java.util.zip.Deflater.BEST_COMPRESSION;
 
 import java.io.BufferedOutputStream;
@@ -60,12 +61,15 @@ import java.util.zip.ZipOutputStream;
  * <pre>{@code
  * java ReleaseStubs.java \
  *   --headers path/to/jspecify-jdk-headers.jar \
+ *   --legal-dir path/to/jspecify-jdk \
  *   --output-dir path/to/out \
  *   [--today yyyy-mm-dd]
  * }</pre>
  *
  * <p>The API comes from the {@code lib/ct.sym} of the running JDK. {@code --today} defaults to the
  * current UTC date, and the releases are the ones {@link #selectReleases} returns for that date.
+ * {@code --legal-dir} is the root of the jspecify/jdk checkout, and each jar carries its {@link
+ * #LEGAL_FILES} under {@code META-INF/}, because the stubs are derived from the OpenJDK sources.
  */
 public final class ReleaseStubs {
   private static final String JSPECIFY_DESCRIPTOR_PREFIX = "Lorg/jspecify/annotations/";
@@ -76,6 +80,10 @@ public final class ReleaseStubs {
    * Same entry timestamp as {@code HeaderCompile.java}, so the jars are byte-for-byte reproducible.
    */
   private static final LocalDateTime FIXED_TIMESTAMP = LocalDateTime.of(2010, 1, 1, 0, 0, 0);
+
+  /** License files at the root of jspecify/jdk, as the OpenJDK repository has them. */
+  static final List<String> LEGAL_FILES =
+      List.of("ADDITIONAL_LICENSE_INFO", "ASSEMBLY_EXCEPTION", "LICENSE");
 
   /** Oldest release that {@link #selectReleases} considers. */
   static final int OLDEST_RELEASE = 8;
@@ -93,24 +101,30 @@ public final class ReleaseStubs {
   public static void main(String[] args) throws IOException {
     Path headersJar = null;
     Path outputDir = null;
+    Path legalDir = null;
     var ctSym = Path.of(System.getProperty("java.home"), "lib", "ct.sym");
     var today = LocalDate.now(ZoneOffset.UTC);
 
     for (int i = 0; i < args.length; i++) {
       switch (args[i]) {
         case "--headers" -> headersJar = Path.of(requireArg(args, ++i, "--headers"));
+        case "--legal-dir" -> legalDir = Path.of(requireArg(args, ++i, "--legal-dir"));
         case "--output-dir" -> outputDir = Path.of(requireArg(args, ++i, "--output-dir"));
         case "--today" -> today = LocalDate.parse(requireArg(args, ++i, "--today"));
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }
-    if (headersJar == null || outputDir == null) {
+    if (headersJar == null || legalDir == null || outputDir == null) {
       throw new IllegalArgumentException(
-          "Usage: java ReleaseStubs.java --headers <headers.jar> --output-dir <dir>"
-              + " [--today <yyyy-mm-dd>]");
+          "Usage: java ReleaseStubs.java --headers <headers.jar> --legal-dir <jspecify-jdk-dir>"
+              + " --output-dir <dir> [--today <yyyy-mm-dd>]");
     }
 
     var headers = readClasses(headersJar);
+    var legalFiles = new TreeMap<String, byte[]>();
+    for (var name : LEGAL_FILES) {
+      legalFiles.put(name, readAllBytes(legalDir.resolve(name)));
+    }
     try (var ctSymZip = new ZipFile(ctSym.toFile())) {
       var api = indexCtSym(ctSymZip);
       var releases = selectReleases(today);
@@ -133,7 +147,7 @@ public final class ReleaseStubs {
       }
       createDirectories(outputDir);
       for (int release : releases) {
-        writeReleaseJar(release, headers, api.get(release), ctSymZip, outputDir);
+        writeReleaseJar(release, headers, api.get(release), ctSymZip, legalFiles, outputDir);
       }
     }
   }
@@ -213,6 +227,7 @@ public final class ReleaseStubs {
       SortedMap<String, ClassModel> headers,
       Map<String, ZipEntry> api,
       ZipFile ctSym,
+      SortedMap<String, byte[]> legalFiles,
       Path outputDir)
       throws IOException {
     var jarPath = outputDir.resolve(jarName(release));
@@ -221,6 +236,13 @@ public final class ReleaseStubs {
         var bufferedOut = new BufferedOutputStream(fileOut);
         var zipOut = new ZipOutputStream(bufferedOut)) {
       zipOut.setLevel(BEST_COMPRESSION);
+      for (var legalFile : legalFiles.entrySet()) {
+        var outEntry = new ZipEntry("META-INF/" + legalFile.getKey());
+        outEntry.setTimeLocal(FIXED_TIMESTAMP);
+        zipOut.putNextEntry(outEntry);
+        zipOut.write(legalFile.getValue());
+        zipOut.closeEntry();
+      }
       for (var header : headers.entrySet()) {
         var sigEntry = api.get(header.getKey());
         if (sigEntry == null) {

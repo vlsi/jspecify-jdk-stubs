@@ -97,12 +97,20 @@ fun TaskContainer.registerReleaseStubs(name: String, headers: FileCollection, ou
         classpath = sourceSets.main.get().runtimeClasspath
         mainClass = "ReleaseStubs"
         inputs.files(headers)
+        // A jspecify/jdk commit can change the license files the jars carry and leave the headers jar as it was.
+        inputs.file(gensrcStamp)
         inputs.property("today", today)
         outputs.dir(outputDir)
         val date = today
+        val jdkSrcDir = jdkSrc.get().asFile
         doFirst { outputDir.get().asFile.deleteRecursively() }
         argumentProviders.add {
-            listOf("--headers", headers.singleFile.path, "--output-dir", outputDir.get().asFile.path, "--today", date.get())
+            listOf(
+                "--headers", headers.singleFile.path,
+                "--legal-dir", jdkSrcDir.path,
+                "--output-dir", outputDir.get().asFile.path,
+                "--today", date.get(),
+            )
         }
     }
 
@@ -138,7 +146,7 @@ val releaseStubsRerun = tasks.registerReleaseStubs(
 val checkHeaders = tasks.registerReproducibilityCheck("checkHeaders", "HeaderCompileTest", headerCompile, headerCompileRerun)
 checkHeaders { description = "Checks the headers jar and that a second Turbine run wrote the same bytes." }
 val checkReleaseStubs = tasks.registerReproducibilityCheck(
-    "checkReleaseStubs", "ReleaseStubsTest", releaseStubs, releaseStubsRerun, today,
+    "checkReleaseStubs", "ReleaseStubsTest", releaseStubs, releaseStubsRerun, today, jdkSrc.map { it.asFile.path },
 )
 checkReleaseStubs { description = "Checks the stubs jars and that a second run wrote the same bytes." }
 
