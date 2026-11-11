@@ -86,3 +86,12 @@ javac, and `./gradlew stubsTest -PstubsDir=<dir>` checks the jars in `<dir>` ins
 [9e93802](https://github.com/jspecify/jdk/commit/9e93802934bc59c6924cbacf1855293d90f799ad), because the jspecify/jdk
 main branch does not have them yet. Here, `--turbine` of `HeaderCompile.java` takes a class path rather than one jar, so
 Turbine comes with its dependencies as separate jars.
+
+## License
+
+The jars are derived from the OpenJDK sources in jspecify/jdk and from the `lib/ct.sym` of the JDK that builds them, so
+they are licensed under the GNU General Public License, version 2, with the Classpath Exception, as OpenJDK is. Each jar
+carries the license files of jspecify/jdk: `META-INF/LICENSE`, `META-INF/ASSEMBLY_EXCEPTION`, and
+`META-INF/ADDITIONAL_LICENSE_INFO`.
+
+The build code in this repository is licensed under the [Apache License, Version 2.0](LICENSE).
