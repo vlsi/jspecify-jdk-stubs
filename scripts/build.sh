@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds build/out/jspecify-jdk-stubs.jar on Linux: scripts/gensrc.sh, then scripts/stubs.sh.
+# Builds build/out/jspecify-jdk-stubs-jdk<N>.jar on Linux: scripts/gensrc.sh, then scripts/stubs.sh.
 set -euo pipefail
 
 scripts=$(dirname "$0")
