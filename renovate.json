@@ -1,0 +1,24 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the tip of jspecify/jdk main",
+      "managerFilePatterns": ["/^versions\\.env$/"],
+      "matchStrings": ["JSPECIFY_JDK_SHA=(?<currentDigest>[0-9a-f]{40})"],
+      "depNameTemplate": "jspecify/jdk",
+      "packageNameTemplate": "https://github.com/jspecify/jdk.git",
+      "currentValueTemplate": "main",
+      "datasourceTemplate": "git-refs"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the Turbine release together with the SHA-256 of its all-deps jar",
+      "managerFilePatterns": ["/^versions\\.env$/"],
+      "matchStrings": ["TURBINE_TAG=(?<currentValue>\\S+)\\s+TURBINE_SHA256=(?<currentDigest>[0-9a-f]{64})"],
+      "depNameTemplate": "google/turbine",
+      "datasourceTemplate": "github-release-attachments"
+    }
+  ]
+}
