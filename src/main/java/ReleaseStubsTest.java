@@ -13,14 +13,12 @@ import java.lang.classfile.TypeAnnotation.SupertypeTarget;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.TreeMap;
+import java.util.SortedMap;
 import java.util.TreeSet;
 import java.util.function.Predicate;
-import java.util.jar.JarFile;
 import java.util.zip.ZipFile;
 
 /**
@@ -36,11 +34,14 @@ public final class ReleaseStubsTest {
   private static final List<String> failures = new ArrayList<>();
 
   public static void main(String[] args) throws Exception {
-    if (args.length < 1 || args.length > 2) {
+    if (args.length != 3) {
       throw new IllegalArgumentException(
-          "Usage: java ReleaseStubsTest.java <stubs-dir> [<second-run-stubs-dir>]");
+          "Usage: java ReleaseStubsTest.java <stubs-dir> <second-run-stubs-dir> <yyyy-mm-dd>");
     }
     var stubsDir = Path.of(args[0]);
+    var rerunDir = Path.of(args[1]);
+    // The date that ReleaseStubs got, so a run past midnight expects the same releases.
+    var today = LocalDate.parse(args[2]);
 
     selectReleases(
         "the day JDK 27 is the newest release", "2026-11-11", List.of(8, 11, 17, 21, 25, 26, 27));
@@ -54,7 +55,7 @@ public final class ReleaseStubsTest {
     selectReleases(
         "an LTS release past its first year", "2029-11-11", List.of(8, 11, 17, 21, 25, 29, 32, 33));
 
-    var releases = ReleaseStubs.selectReleases(LocalDate.now(ZoneOffset.UTC));
+    var releases = ReleaseStubs.selectReleases(today);
     var expectedJars = new TreeSet<String>();
     releases.forEach(r -> expectedJars.add(ReleaseStubs.jarName(r)));
     var actualJars = new TreeSet<String>();
@@ -63,18 +64,16 @@ public final class ReleaseStubsTest {
     }
     checkEquals(expectedJars, actualJars, "jars in " + stubsDir);
 
-    if (args.length == 2) {
-      for (var jarName : actualJars) {
-        long offset = mismatch(stubsDir.resolve(jarName), Path.of(args[1]).resolve(jarName));
-        check(offset == -1, "Two runs wrote different " + jarName + " at byte offset " + offset);
-      }
+    for (var jarName : actualJars) {
+      long offset = mismatch(stubsDir.resolve(jarName), rerunDir.resolve(jarName));
+      check(offset == -1, "Two runs wrote different " + jarName + " at byte offset " + offset);
     }
 
     var ctSym = Path.of(System.getProperty("java.home"), "lib", "ct.sym");
     try (var ctSymZip = new ZipFile(ctSym.toFile())) {
       var api = ReleaseStubs.indexCtSym(ctSymZip);
       for (int release : releases) {
-        var classes = readClasses(stubsDir.resolve(ReleaseStubs.jarName(release)));
+        var classes = ReleaseStubs.readClasses(stubsDir.resolve(ReleaseStubs.jarName(release)));
         for (var entry : classes.entrySet()) {
           ClassModel sig;
           try (var in = ctSymZip.getInputStream(api.get(release).get(entry.getKey()))) {
@@ -135,10 +134,7 @@ public final class ReleaseStubsTest {
               + " signature "
               + ReleaseStubs.signature(method)
               + " throws "
-              + method
-                  .findAttribute(Attributes.exceptions())
-                  .map(a -> a.exceptions().stream().map(e -> e.asInternalName()).toList())
-                  .orElse(List.of()));
+              + ReleaseStubs.exceptions(method));
     }
     for (var field : model.fields()) {
       members.add(
@@ -151,7 +147,7 @@ public final class ReleaseStubsTest {
     return members;
   }
 
-  private static void checkAnnotations(int release, TreeMap<String, ClassModel> classes) {
+  private static void checkAnnotations(int release, SortedMap<String, ClassModel> classes) {
     var where = "release " + release + ", ";
 
     var getProperty =
@@ -231,7 +227,7 @@ public final class ReleaseStubsTest {
   }
 
   private static MethodModel method(
-      TreeMap<String, ClassModel> classes, String className, String key) {
+      SortedMap<String, ClassModel> classes, String className, String key) {
     var model = classes.get(className);
     if (model == null) {
       return null;
@@ -262,23 +258,6 @@ public final class ReleaseStubsTest {
 
   private static boolean is(Annotation annotation, String descriptor) {
     return annotation.classSymbol().descriptorString().equals(descriptor);
-  }
-
-  private static TreeMap<String, ClassModel> readClasses(Path jarPath) throws Exception {
-    var classes = new TreeMap<String, ClassModel>();
-    try (var jar = new JarFile(jarPath.toFile())) {
-      var entries = jar.entries();
-      while (entries.hasMoreElements()) {
-        var entry = entries.nextElement();
-        var name = entry.getName();
-        try (var in = jar.getInputStream(entry)) {
-          classes.put(
-              name.substring(0, name.length() - ".class".length()),
-              ClassFile.of().parse(in.readAllBytes()));
-        }
-      }
-    }
-    return classes;
   }
 
   private static void checkEquals(Object expected, Object actual, String what) {

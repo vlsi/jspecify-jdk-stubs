@@ -1,5 +1,4 @@
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.zip.ZipEntry.DEFLATED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.junit.jupiter.api.Named.named;
@@ -15,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -44,20 +44,20 @@ class StubsNullAwayTest {
   static Stream<Arguments> stubsJars() throws IOException {
     var dir = Path.of(Objects.requireNonNull(
         System.getProperty("stubsDir"), "-DstubsDir must name the directory with the stubs jars"));
-    var jars = new ArrayList<Arguments>();
+    var jars = new TreeMap<Integer, Path>();
     try (var files = Files.list(dir)) {
       for (var jar : files.toList()) {
         var matcher = JAR_NAME.matcher(jar.getFileName().toString());
         if (matcher.matches()) {
-          jars.add(arguments(Integer.parseInt(matcher.group(1)), named(jar.getFileName().toString(), jar)));
+          jars.put(Integer.parseInt(matcher.group(1)), jar);
         }
       }
     }
     if (jars.isEmpty()) {
       throw new IllegalStateException("No jspecify-jdk-stubs-jdk<N>.jar in " + dir);
     }
-    jars.sort((a, b) -> Integer.compare((int) a.get()[0], (int) b.get()[0]));
-    return jars.stream();
+    return jars.entrySet().stream()
+        .map(e -> arguments(e.getKey(), named(e.getValue().getFileName().toString(), e.getValue())));
   }
 
   @ParameterizedTest
@@ -191,7 +191,7 @@ class StubsNullAwayTest {
    * Returns a jar of the release 8 classes in the {@code lib/ct.sym} of the running JDK, written
    * on the first call.
    */
-  private static synchronized Path release8Api() {
+  private static Path release8Api() {
     var jar = tempDir.resolve("release8-api.jar");
     if (Files.exists(jar)) {
       return jar;
@@ -202,7 +202,6 @@ class StubsNullAwayTest {
     var ctSym = Path.of(System.getProperty("java.home"), "lib", "ct.sym");
     try (var in = new ZipFile(ctSym.toFile());
         var out = new ZipOutputStream(Files.newOutputStream(jar))) {
-      out.setMethod(DEFLATED);
       for (var entries = in.entries(); entries.hasMoreElements(); ) {
         var entry = entries.nextElement();
         var matcher = entryName.matcher(entry.getName());

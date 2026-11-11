@@ -1,7 +1,6 @@
 import static java.nio.file.Files.createDirectories;
 import static java.nio.file.Files.newOutputStream;
 import static java.util.zip.Deflater.BEST_COMPRESSION;
-import static java.util.zip.ZipEntry.DEFLATED;
 
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -37,6 +36,7 @@ import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.jar.JarFile;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -61,12 +61,11 @@ import java.util.zip.ZipOutputStream;
  * java ReleaseStubs.java \
  *   --headers path/to/jspecify-jdk-headers.jar \
  *   --output-dir path/to/out \
- *   [--ct-sym path/to/lib/ct.sym] \
  *   [--today yyyy-mm-dd]
  * }</pre>
  *
- * <p>{@code --ct-sym} defaults to the file of the running JDK, and {@code --today} to the current
- * UTC date. The releases are the ones {@link #selectReleases} returns for that date.
+ * <p>The API comes from the {@code lib/ct.sym} of the running JDK. {@code --today} defaults to the
+ * current UTC date, and the releases are the ones {@link #selectReleases} returns for that date.
  */
 public final class ReleaseStubs {
   private static final String JSPECIFY_DESCRIPTOR_PREFIX = "Lorg/jspecify/annotations/";
@@ -101,7 +100,6 @@ public final class ReleaseStubs {
       switch (args[i]) {
         case "--headers" -> headersJar = Path.of(requireArg(args, ++i, "--headers"));
         case "--output-dir" -> outputDir = Path.of(requireArg(args, ++i, "--output-dir"));
-        case "--ct-sym" -> ctSym = Path.of(requireArg(args, ++i, "--ct-sym"));
         case "--today" -> today = LocalDate.parse(requireArg(args, ++i, "--today"));
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
@@ -109,32 +107,15 @@ public final class ReleaseStubs {
     if (headersJar == null || outputDir == null) {
       throw new IllegalArgumentException(
           "Usage: java ReleaseStubs.java --headers <headers.jar> --output-dir <dir>"
-              + " [--ct-sym <ct.sym>] [--today <yyyy-mm-dd>]");
+              + " [--today <yyyy-mm-dd>]");
     }
 
     var headers = readClasses(headersJar);
     try (var ctSymZip = new ZipFile(ctSym.toFile())) {
       var api = indexCtSym(ctSymZip);
       var releases = selectReleases(today);
-      var tooNew = releases.stream().filter(r -> r > api.lastKey()).toList();
-      if (!tooNew.isEmpty()) {
-        throw new IllegalStateException(
-            "Releases "
-                + releases
-                + " get a stubs jar on "
-                + today
-                + ", but "
-                + ctSym
-                + " ends at release "
-                + api.lastKey()
-                + ". Set jdkBuildVersion="
-                + tooNew.getLast()
-                + " in gradle.properties, or run with JDK "
-                + tooNew.getLast()
-                + " or later, or pass --ct-sym with the ct.sym file of such a JDK.");
-      }
-      var dropped = releases.stream().filter(r -> !api.containsKey(r)).toList();
-      if (!dropped.isEmpty()) {
+      var missing = releases.stream().filter(r -> !api.containsKey(r)).toList();
+      if (!missing.isEmpty()) {
         throw new IllegalStateException(
             "Releases "
                 + releases
@@ -143,9 +124,12 @@ public final class ReleaseStubs {
                 + ", but "
                 + ctSym
                 + " has no data for "
-                + dropped
-                + ", which javac --release of that JDK no longer accepts. Pass --ct-sym with the"
-                + " ct.sym file of a JDK that has every one of these releases.");
+                + missing
+                + ". Set jdkBuildVersion in gradle.properties to a JDK whose lib/ct.sym has releases "
+                + releases.getFirst()
+                + " to "
+                + releases.getLast()
+                + ".");
       }
       createDirectories(outputDir);
       for (int release : releases) {
@@ -205,7 +189,7 @@ public final class ReleaseStubs {
     return api;
   }
 
-  private static SortedMap<String, ClassModel> readClasses(Path jarPath) throws IOException {
+  static SortedMap<String, ClassModel> readClasses(Path jarPath) throws IOException {
     var classes = new TreeMap<String, ClassModel>();
     try (var jar = new JarFile(jarPath.toFile())) {
       var entries = jar.entries();
@@ -236,7 +220,6 @@ public final class ReleaseStubs {
     try (var fileOut = newOutputStream(jarPath);
         var bufferedOut = new BufferedOutputStream(fileOut);
         var zipOut = new ZipOutputStream(bufferedOut)) {
-      zipOut.setMethod(DEFLATED);
       zipOut.setLevel(BEST_COMPRESSION);
       for (var header : headers.entrySet()) {
         var sigEntry = api.get(header.getKey());
@@ -278,11 +261,8 @@ public final class ReleaseStubs {
   private static byte[] stub(ClassModel sig, ClassModel header, int release, Stats stats) {
     var headerMethods = byKey(header.methods(), ReleaseStubs::methodKey);
     var headerFields = byKey(header.fields(), ReleaseStubs::fieldKey);
-    var classAnnotations = merge(sig, header, false, false);
-    var classTypeAnnotations = new ArrayList<TypeAnnotation>();
-    sig.findAttribute(Attributes.runtimeVisibleTypeAnnotations())
-        .ifPresent(a -> classTypeAnnotations.addAll(a.annotations()));
-    classTypeAnnotations.addAll(classTypeAnnotations(sig, header, stats));
+    var classAnnotations = declarationAnnotations(sig, jspecifyAnnotations(header));
+    var classTypeAnnotations = typeAnnotations(sig, classTypeAnnotations(sig, header, stats));
 
     ClassTransform transform =
         (clb, element) -> {
@@ -298,15 +278,22 @@ public final class ReleaseStubs {
               if (markUnmarked) {
                 stats.unmatchedMethods++;
               }
-              var annotations = merge(method, matched ? match : null, matched, markUnmarked);
+              var declaration =
+                  declarationAnnotations(
+                      method,
+                      matched
+                          ? jspecifyAnnotations(match)
+                          : markUnmarked ? List.of(Annotation.of(NULL_UNMARKED)) : List.of());
+              var type =
+                  typeAnnotations(method, matched ? jspecifyTypeAnnotations(match) : List.of());
               clb.transformMethod(
                   method,
                   MethodTransform.dropping(ReleaseStubs::isVisibleAnnotations)
                       .andThen(
                           MethodTransform.endHandler(
                               mb -> {
-                                annotations.declaration().ifPresent(mb::with);
-                                annotations.type().ifPresent(mb::with);
+                                declaration.ifPresent(mb::with);
+                                type.ifPresent(mb::with);
                               })));
             }
             case FieldModel field -> {
@@ -315,15 +302,18 @@ public final class ReleaseStubs {
               if (!matched) {
                 stats.unmatchedFields++;
               }
-              var annotations = merge(field, matched ? match : null, matched, false);
+              var declaration =
+                  declarationAnnotations(field, matched ? jspecifyAnnotations(match) : List.of());
+              var type =
+                  typeAnnotations(field, matched ? jspecifyTypeAnnotations(match) : List.of());
               clb.transformField(
                   field,
                   FieldTransform.dropping(ReleaseStubs::isVisibleAnnotations)
                       .andThen(
                           FieldTransform.endHandler(
                               fb -> {
-                                annotations.declaration().ifPresent(fb::with);
-                                annotations.type().ifPresent(fb::with);
+                                declaration.ifPresent(fb::with);
+                                type.ifPresent(fb::with);
                               })));
             }
             default -> clb.with(element);
@@ -335,10 +325,8 @@ public final class ReleaseStubs {
             transform.andThen(
                 ClassTransform.endHandler(
                     clb -> {
-                      classAnnotations.declaration().ifPresent(clb::with);
-                      if (!classTypeAnnotations.isEmpty()) {
-                        clb.with(RuntimeVisibleTypeAnnotationsAttribute.of(classTypeAnnotations));
-                      }
+                      classAnnotations.ifPresent(clb::with);
+                      classTypeAnnotations.ifPresent(clb::with);
                     })));
   }
 
@@ -353,15 +341,7 @@ public final class ReleaseStubs {
     var sigShape = ClassShape.of(sig);
     var headerShape = ClassShape.of(header);
     var kept = new ArrayList<TypeAnnotation>();
-    var annotations =
-        header
-            .findAttribute(Attributes.runtimeVisibleTypeAnnotations())
-            .map(a -> a.annotations())
-            .orElse(List.of());
-    for (var annotation : annotations) {
-      if (!isJSpecify(annotation.annotation())) {
-        continue;
-      }
+    for (var annotation : jspecifyTypeAnnotations(header)) {
       boolean fits =
           switch (annotation.targetInfo()) {
             case TypeAnnotation.SupertypeTarget supertype ->
@@ -418,55 +398,45 @@ public final class ReleaseStubs {
     }
   }
 
-  /** Visible annotations of one class, method, or field, ready to be written. */
-  private record VisibleAnnotations(
-      Optional<RuntimeVisibleAnnotationsAttribute> declaration,
-      Optional<RuntimeVisibleTypeAnnotationsAttribute> type) {}
+  /** Returns the visible annotations of {@code sig} followed by {@code added}, if there are any. */
+  private static Optional<RuntimeVisibleAnnotationsAttribute> declarationAnnotations(
+      AttributedElement sig, List<Annotation> added) {
+    var annotations = new ArrayList<Annotation>();
+    sig.findAttribute(Attributes.runtimeVisibleAnnotations())
+        .ifPresent(a -> annotations.addAll(a.annotations()));
+    annotations.addAll(added);
+    return annotations.isEmpty()
+        ? Optional.empty()
+        : Optional.of(RuntimeVisibleAnnotationsAttribute.of(annotations));
+  }
 
   /**
-   * Returns the visible annotations of {@code sig} plus the JSpecify annotations of {@code header}.
-   * Type annotations of {@code header} are added only when {@code copyTypeAnnotations} is set, and
-   * {@code nullUnmarked} adds {@code @NullUnmarked}. A null {@code header} adds nothing.
+   * Returns the visible type annotations of {@code sig} followed by {@code added}, if there are
+   * any.
    */
-  private static VisibleAnnotations merge(
-      AttributedElement sig,
-      AttributedElement header,
-      boolean copyTypeAnnotations,
-      boolean nullUnmarked) {
-    var declaration = new ArrayList<Annotation>();
-    sig.findAttribute(Attributes.runtimeVisibleAnnotations())
-        .ifPresent(a -> declaration.addAll(a.annotations()));
-    var type = new ArrayList<TypeAnnotation>();
+  private static Optional<RuntimeVisibleTypeAnnotationsAttribute> typeAnnotations(
+      AttributedElement sig, List<TypeAnnotation> added) {
+    var annotations = new ArrayList<TypeAnnotation>();
     sig.findAttribute(Attributes.runtimeVisibleTypeAnnotations())
-        .ifPresent(a -> type.addAll(a.annotations()));
-    if (header != null) {
-      header
-          .findAttribute(Attributes.runtimeVisibleAnnotations())
-          .ifPresent(
-              a ->
-                  a.annotations().stream()
-                      .filter(ReleaseStubs::isJSpecify)
-                      .forEach(declaration::add));
-      if (copyTypeAnnotations) {
-        header
-            .findAttribute(Attributes.runtimeVisibleTypeAnnotations())
-            .ifPresent(
-                a ->
-                    a.annotations().stream()
-                        .filter(ta -> isJSpecify(ta.annotation()))
-                        .forEach(type::add));
-      }
-    }
-    if (nullUnmarked) {
-      declaration.add(Annotation.of(NULL_UNMARKED));
-    }
-    return new VisibleAnnotations(
-        declaration.isEmpty()
-            ? Optional.empty()
-            : Optional.of(RuntimeVisibleAnnotationsAttribute.of(declaration)),
-        type.isEmpty()
-            ? Optional.empty()
-            : Optional.of(RuntimeVisibleTypeAnnotationsAttribute.of(type)));
+        .ifPresent(a -> annotations.addAll(a.annotations()));
+    annotations.addAll(added);
+    return annotations.isEmpty()
+        ? Optional.empty()
+        : Optional.of(RuntimeVisibleTypeAnnotationsAttribute.of(annotations));
+  }
+
+  private static List<Annotation> jspecifyAnnotations(AttributedElement header) {
+    return header
+        .findAttribute(Attributes.runtimeVisibleAnnotations())
+        .map(a -> a.annotations().stream().filter(ReleaseStubs::isJSpecify).toList())
+        .orElse(List.of());
+  }
+
+  private static List<TypeAnnotation> jspecifyTypeAnnotations(AttributedElement header) {
+    return header
+        .findAttribute(Attributes.runtimeVisibleTypeAnnotations())
+        .map(a -> a.annotations().stream().filter(t -> isJSpecify(t.annotation())).toList())
+        .orElse(List.of());
   }
 
   private static boolean isJSpecify(Annotation annotation) {
@@ -483,11 +453,7 @@ public final class ReleaseStubs {
   }
 
   private static <T> Map<String, T> byKey(List<T> members, Function<T, String> key) {
-    var map = new HashMap<String, T>();
-    for (var member : members) {
-      map.put(key.apply(member), member);
-    }
-    return map;
+    return members.stream().collect(Collectors.toMap(key, Function.identity()));
   }
 
   static String methodKey(MethodModel method) {
@@ -504,11 +470,7 @@ public final class ReleaseStubs {
    * annotation is on one of them. Without JSpecify type annotations, nothing has to be equal.
    */
   private static boolean typeAnnotationsFit(AttributedElement header, AttributedElement sig) {
-    var annotations =
-        header
-            .findAttribute(Attributes.runtimeVisibleTypeAnnotations())
-            .map(a -> a.annotations().stream().filter(t -> isJSpecify(t.annotation())).toList())
-            .orElse(List.of());
+    var annotations = jspecifyTypeAnnotations(header);
     if (annotations.isEmpty()) {
       return true;
     }
@@ -520,7 +482,7 @@ public final class ReleaseStubs {
         || exceptions(header).equals(exceptions(sig));
   }
 
-  private static List<String> exceptions(AttributedElement method) {
+  static List<String> exceptions(AttributedElement method) {
     return method
         .findAttribute(Attributes.exceptions())
         .map(a -> a.exceptions().stream().map(e -> e.asInternalName()).toList())

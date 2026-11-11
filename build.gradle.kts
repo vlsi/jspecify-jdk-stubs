@@ -91,35 +91,38 @@ fun TaskContainer.registerHeaderCompile(name: String, output: Provider<RegularFi
         }
     }
 
-fun TaskContainer.registerReleaseStubs(name: String, headers: Provider<RegularFile>, outputDir: Provider<Directory>) =
+fun TaskContainer.registerReleaseStubs(name: String, headers: FileCollection, outputDir: Provider<Directory>) =
     register<JavaExec>(name) {
-        dependsOn(headerCompile)
         description = "Writes one stubs jar per selected Java release into ${outputDir.get().asFile.name}."
         classpath = sourceSets.main.get().runtimeClasspath
         mainClass = "ReleaseStubs"
-        inputs.file(headers)
+        inputs.files(headers)
         inputs.property("today", today)
         outputs.dir(outputDir)
         val date = today
         doFirst { outputDir.get().asFile.deleteRecursively() }
         argumentProviders.add {
-            listOf("--headers", headers.get().asFile.path, "--output-dir", outputDir.get().asFile.path, "--today", date.get())
+            listOf("--headers", headers.singleFile.path, "--output-dir", outputDir.get().asFile.path, "--today", date.get())
         }
     }
 
 fun TaskContainer.registerReproducibilityCheck(
     name: String,
     mainClass: String,
-    producers: List<TaskProvider<*>>,
-    first: Provider<out FileSystemLocation>,
-    second: Provider<out FileSystemLocation>,
+    first: TaskProvider<*>,
+    second: TaskProvider<*>,
+    vararg extraArgs: Provider<String>,
 ) =
     register<JavaExec>(name) {
-        dependsOn(producers)
         classpath = sourceSets.main.get().runtimeClasspath
         this.mainClass = mainClass
-        inputs.files(first, second)
-        argumentProviders.add { listOf(first.get().asFile.path, second.get().asFile.path) }
+        val firstOutput = files(first)
+        val secondOutput = files(second)
+        inputs.files(firstOutput, secondOutput)
+        val extra = extraArgs.toList()
+        argumentProviders.add {
+            listOf(firstOutput.singleFile.path, secondOutput.singleFile.path) + extra.map { it.get() }
+        }
     }
 
 // Each step runs twice, and the *Test programs check that both runs wrote identical jars.
@@ -127,18 +130,15 @@ val headerCompile = tasks.registerHeaderCompile("headerCompile", layout.buildDir
 val headerCompileRerun = tasks.registerHeaderCompile(
     "headerCompileRerun", layout.buildDirectory.file("rerun/jspecify-jdk-headers.jar"),
 )
-val headersJar = layout.buildDirectory.file("jspecify-jdk-headers.jar")
-val releaseStubs = tasks.registerReleaseStubs("releaseStubs", headersJar, layout.buildDirectory.dir("out"))
-val releaseStubsRerun = tasks.registerReleaseStubs("releaseStubsRerun", headersJar, layout.buildDirectory.dir("rerun/out"))
-
-val checkHeaders = tasks.registerReproducibilityCheck(
-    "checkHeaders", "HeaderCompileTest", listOf(headerCompile, headerCompileRerun),
-    headersJar, layout.buildDirectory.file("rerun/jspecify-jdk-headers.jar"),
+val releaseStubs = tasks.registerReleaseStubs("releaseStubs", files(headerCompile), layout.buildDirectory.dir("out"))
+val releaseStubsRerun = tasks.registerReleaseStubs(
+    "releaseStubsRerun", files(headerCompile), layout.buildDirectory.dir("rerun/out"),
 )
+
+val checkHeaders = tasks.registerReproducibilityCheck("checkHeaders", "HeaderCompileTest", headerCompile, headerCompileRerun)
 checkHeaders { description = "Checks the headers jar and that a second Turbine run wrote the same bytes." }
 val checkReleaseStubs = tasks.registerReproducibilityCheck(
-    "checkReleaseStubs", "ReleaseStubsTest", listOf(releaseStubs, releaseStubsRerun),
-    layout.buildDirectory.dir("out"), layout.buildDirectory.dir("rerun/out"),
+    "checkReleaseStubs", "ReleaseStubsTest", releaseStubs, releaseStubsRerun, today,
 )
 checkReleaseStubs { description = "Checks the stubs jars and that a second run wrote the same bytes." }
 
@@ -157,7 +157,6 @@ testing {
             useJUnitJupiter(libs.versions.junit)
             dependencies {
                 implementation(libs.errorprone.core)
-                implementation(libs.errorprone.test.helpers)
                 implementation(libs.jspecify)
                 implementation(libs.nullaway)
             }

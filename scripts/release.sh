@@ -11,7 +11,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=SCRIPTDIR/../versions.env
 source "$root/versions.env"
 
-out_dir=${WORK_DIR:-$root/build}/out
+out_dir=$root/build/out
 jars=("$out_dir"/jspecify-jdk-stubs-jdk*.jar)
 if [[ ! -f "${jars[0]}" ]]; then
   echo "No jspecify-jdk-stubs-jdk*.jar in $out_dir; run ./gradlew stubs first" >&2
