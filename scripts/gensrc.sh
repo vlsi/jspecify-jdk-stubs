@@ -14,7 +14,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=SCRIPTDIR/../versions.env
 source "$root/versions.env"
 
-work=${WORK_DIR:-$root/build}
+work=$root/build
 jdk_dir=$work/jdk
 stamp=$work/gensrc.sha
 mkdir -p "$work"
