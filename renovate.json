@@ -14,11 +14,30 @@
     },
     {
       "customType": "regex",
-      "description": "Update the Turbine release together with the SHA-256 of its all-deps jar",
-      "managerFilePatterns": ["/^versions\\.env$/"],
-      "matchStrings": ["TURBINE_TAG=(?<currentValue>\\S+)\\s+TURBINE_SHA256=(?<currentDigest>[0-9a-f]{64})"],
-      "depNameTemplate": "google/turbine",
-      "datasourceTemplate": "github-release-attachments"
+      "description": "Track the newest generally available Java major in jdkBuildVersion. The datasource returns versions such as 28.0.1+9; extractVersion keeps the major, so Renovate writes 28 when the next major ships and ignores 27.0.x updates.",
+      "managerFilePatterns": ["/^gradle\\.properties$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+jdkBuildVersion=(?<currentValue>\\d+)"
+      ],
+      "extractVersionTemplate": "^(?<version>\\d+)"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the newest LTS Java major that runs Gradle",
+      "managerFilePatterns": ["/^gradle/gradle-daemon-jvm\\.properties$/"],
+      "matchStrings": ["toolchainVersion=(?<currentValue>\\d+)"],
+      "depNameTemplate": "java-lts",
+      "packageNameTemplate": "java-jdk",
+      "datasourceTemplate": "java-version",
+      "versioningTemplate": "regex:^(?<major>\\d+)",
+      "extractVersionTemplate": "^(?<version>\\d+)"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "An LTS release ships every two years: 21, 25, and every fourth major after them",
+      "matchDepNames": ["java-lts"],
+      "allowedVersions": "/^(25|29|33|37|41|45|49)(\\.|$)/"
     }
   ]
 }

@@ -127,7 +127,9 @@ public final class ReleaseStubs {
                 + ctSym
                 + " ends at release "
                 + api.lastKey()
-                + ". Run with JDK "
+                + ". Set jdkBuildVersion="
+                + tooNew.getLast()
+                + " in gradle.properties, or run with JDK "
                 + tooNew.getLast()
                 + " or later, or pass --ct-sym with the ct.sym file of such a JDK.");
       }

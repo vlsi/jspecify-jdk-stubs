@@ -16,23 +16,49 @@ jobs:
   build:
     name: Build stubs
     runs-on: ubuntu-latest
+    outputs:
+      test-jdks: ${{ steps.jdks.outputs.test }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The stubs of each Java release come from this JDK's lib/ct.sym, so it has to be at least as
-      # new as the newest release in GA. The build fails and names the JDK it needs when it is not.
-      - name: Set up JDK 27
+      # gradle.properties names the JDK that builds the stubs, whose lib/ct.sym has to cover the
+      # newest release in GA, and gradle-daemon-jvm.properties the JDK that runs Gradle. The stubs
+      # are tested with javac of every LTS release from 21, the oldest Error Prone runs on, and of
+      # the build JDK.
+      - name: Read the JDK versions
+        id: jdks
+        run: |
+          build=$(sed -n 's/^jdkBuildVersion=//p' gradle.properties)
+          gradle=$(sed -n 's/^toolchainVersion=//p' gradle/gradle-daemon-jvm.properties)
+          test=()
+          for ((v = 21; v < build; v += 4)); do test+=("$v"); done
+          test+=("$build")
+          {
+            echo "build=$build"
+            echo "gradle=$gradle"
+            echo "test=$(printf '%s\n' "${test[@]}" | jq --raw-input --slurp --compact-output 'split("\n")[:-1]')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Set up JDK ${{ steps.jdks.outputs.build }} and ${{ steps.jdks.outputs.gradle }}
         uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
-          java-version: 27
           distribution: temurin
+          java-version: |
+            ${{ steps.jdks.outputs.build }}
+            ${{ steps.jdks.outputs.gradle }}
       - name: Install configure dependencies
         run: |
           sudo apt-get update
           sudo apt-get install libcups2-dev libasound2-dev libfontconfig1-dev
+      # Gradle does not look where setup-java installs a JDK, so it is pointed at the variable
+      # setup-java sets, and fails rather than downloads a JDK when that misses.
       - name: Build
-        run: scripts/build.sh
+        env:
+          BUILD_JDK: ${{ steps.jdks.outputs.build }}
+        run: >-
+          ./gradlew --quiet stubs
+          "-Porg.gradle.java.installations.fromEnv=JAVA_HOME_${BUILD_JDK}_X64"
+          -Porg.gradle.java.installations.auto-download=false
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: jspecify-jdk-stubs
@@ -45,9 +71,49 @@ jobs:
           name: build-logs
           path: build/*.log
 
+  test:
+    name: NullAway on JDK ${{ matrix.jdk }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jdk: ${{ fromJson(needs.build.outputs.test-jdks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the Gradle JDK version
+        id: jdks
+        run: echo "gradle=$(sed -n 's/^toolchainVersion=//p' gradle/gradle-daemon-jvm.properties)" >> "$GITHUB_OUTPUT"
+      - name: Set up JDK ${{ matrix.jdk }} and ${{ steps.jdks.outputs.gradle }}
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: |
+            ${{ matrix.jdk }}
+            ${{ steps.jdks.outputs.gradle }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: jspecify-jdk-stubs
+          path: stubs
+      - name: Test
+        env:
+          TEST_JDK: ${{ matrix.jdk }}
+        run: >-
+          ./gradlew --quiet stubsTest "-PjdkTestVersion=${TEST_JDK}" -PstubsDir=stubs
+          "-Porg.gradle.java.installations.fromEnv=JAVA_HOME_${TEST_JDK}_X64"
+          -Porg.gradle.java.installations.auto-download=false
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports-jdk${{ matrix.jdk }}
+          path: build/reports/tests
+
   release:
     name: Release
-    needs: build
+    needs: [build, test]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
