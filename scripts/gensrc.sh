@@ -3,7 +3,8 @@
 # `make gensrc` there. Skips both when build/jdk already holds gensrc output for that commit.
 #
 # Runs on Linux: the JDK configure script needs a full Xcode with the Metal toolchain on macOS.
-# On macOS, use scripts/gensrc-in-docker.sh.
+# ./gradlew gensrc runs it on Linux with the build JDK on PATH, and through
+# scripts/gensrc-in-docker.sh elsewhere.
 #
 # Requires a JDK 26 or later on PATH (configure uses it as the boot JDK), git, autoconf, make,
 # a C/C++ compiler, and the headers for cups, alsa, and fontconfig.

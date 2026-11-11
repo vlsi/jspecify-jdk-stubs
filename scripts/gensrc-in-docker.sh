@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs scripts/gensrc.sh in a Linux container, so it works on macOS too. The output lands in
-# build/jdk on the host, where scripts/stubs.sh reads it.
+# build/jdk on the host. ./gradlew gensrc runs it everywhere but on Linux.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)

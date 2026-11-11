@@ -14,7 +14,7 @@ source "$root/versions.env"
 out_dir=${WORK_DIR:-$root/build}/out
 jars=("$out_dir"/jspecify-jdk-stubs-jdk*.jar)
 if [[ ! -f "${jars[0]}" ]]; then
-  echo "No jspecify-jdk-stubs-jdk*.jar in $out_dir; run scripts/build.sh first" >&2
+  echo "No jspecify-jdk-stubs-jdk*.jar in $out_dir; run ./gradlew stubs first" >&2
   exit 1
 fi
 
@@ -36,6 +36,8 @@ if [[ "$latest_digests" == "$digests" ]]; then
   exit 0
 fi
 
+turbine_version=$(sed -n 's/^turbine = "com.google.turbine:turbine:\(.*\)"$/\1/p' "$root/gradle/libs.versions.toml")
+
 date_tag=v$(date -u +%Y.%m.%d)
 tag=$date_tag
 n=1
@@ -43,7 +45,7 @@ while gh release view "$tag" > /dev/null 2>&1; do
   n=$((n + 1))
   tag=$date_tag.$n
 done
-notes="JDK stubs with JSpecify annotations, built from [jspecify/jdk@${JSPECIFY_JDK_SHA:0:12}](https://github.com/jspecify/jdk/commit/$JSPECIFY_JDK_SHA) with Turbine ${TURBINE_TAG#v}. Each \`jspecify-jdk-stubs-jdk<N>.jar\` declares the API of Java SE release N, as \`javac --release N\` sees it.
+notes="JDK stubs with JSpecify annotations, built from [jspecify/jdk@${JSPECIFY_JDK_SHA:0:12}](https://github.com/jspecify/jdk/commit/$JSPECIFY_JDK_SHA) with Turbine $turbine_version. Each \`jspecify-jdk-stubs-jdk<N>.jar\` declares the API of Java SE release N, as \`javac --release N\` sees it.
 
 SHA-256 digests, in the format \`shasum -a 256 --check\` reads:
 

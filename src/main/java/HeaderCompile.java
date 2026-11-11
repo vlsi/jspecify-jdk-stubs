@@ -50,7 +50,7 @@ import java.util.zip.ZipOutputStream;
  *
  * <pre>{@code
  * java jspecify/HeaderCompile.java \
- *   --turbine path/to/turbine-all-deps.jar \
+ *   --turbine path/to/turbine.jar:path/to/guava.jar:... \
  *   --output path/to/jspecify-jdk-stubs.jar \
  *   [--jdk-src path/to/jdk] \
  *   [--gensrc path/to/build/<conf>/support/gensrc]
@@ -64,23 +64,23 @@ public final class HeaderCompile {
   private static final LocalDateTime FIXED_TIMESTAMP = LocalDateTime.of(2010, 1, 1, 0, 0, 0);
 
   public static void main(String[] args) throws Exception {
-    Path turbineJar = null;
+    String turbineClassPath = null;
     Path outputJar = null;
     var jdkSrc = Path.of(".");
     Path gensrcDir = null;
 
     for (int i = 0; i < args.length; i++) {
       switch (args[i]) {
-        case "--turbine" -> turbineJar = Path.of(requireArg(args, ++i, "--turbine"));
+        case "--turbine" -> turbineClassPath = requireArg(args, ++i, "--turbine");
         case "--output" -> outputJar = Path.of(requireArg(args, ++i, "--output"));
         case "--jdk-src" -> jdkSrc = Path.of(requireArg(args, ++i, "--jdk-src"));
         case "--gensrc" -> gensrcDir = Path.of(requireArg(args, ++i, "--gensrc"));
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }
-    if (turbineJar == null || outputJar == null) {
+    if (turbineClassPath == null || outputJar == null) {
       throw new IllegalArgumentException(
-          "Usage: java HeaderCompile.java --turbine <turbine.jar> --output <out.jar>"
+          "Usage: java HeaderCompile.java --turbine <turbine class path> --output <out.jar>"
               + " [--jdk-src <dir>] [--gensrc <dir>]");
     }
     if (gensrcDir == null) {
@@ -91,7 +91,7 @@ public final class HeaderCompile {
     var rawJar = createTempFile("jspecify-jdk-raw-", ".jar");
     var paramsFile = createTempFile("jspecify-jdk-turbine-", ".params");
     try {
-      runTurbine(turbineJar, sources, rawJar, paramsFile);
+      runTurbine(turbineClassPath, sources, rawJar, paramsFile);
       filterJar(rawJar, outputJar.toAbsolutePath());
     } finally {
       deleteIfExists(rawJar);
@@ -164,7 +164,8 @@ public final class HeaderCompile {
     return sources;
   }
 
-  private static void runTurbine(Path turbineJar, List<Path> sources, Path rawJar, Path paramsFile)
+  private static void runTurbine(
+      String turbineClassPath, List<Path> sources, Path rawJar, Path paramsFile)
       throws IOException, InterruptedException {
     var params = new ArrayList<String>(sources.size() + 8);
     params.add("--output");
@@ -186,7 +187,7 @@ public final class HeaderCompile {
         new ProcessBuilder(
                 javaBin,
                 "-cp",
-                turbineJar.toString(),
+                turbineClassPath,
                 "com.google.turbine.main.Main",
                 "@" + paramsFile)
             .inheritIO()
