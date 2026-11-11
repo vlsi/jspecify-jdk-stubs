@@ -41,13 +41,16 @@ flag from 21.0.8 in OpenJDK builds such as Temurin, and not in Oracle JDK; see
 ## How releases are made
 
 [versions.env](versions.env) pins the jspecify/jdk commit, [gradle/libs.versions.toml](gradle/libs.versions.toml) pins
-Turbine, Error Prone, and NullAway, and [gradle/verification-metadata.xml](gradle/verification-metadata.xml) lists the
-PGP keys that every jar the build downloads has to be signed with, with
+Turbine, Error Prone, NullAway, and JUnit, and [gradle/verification-metadata.xml](gradle/verification-metadata.xml)
+lists the PGP keys that every jar the build downloads has to be signed with, with
 [gradle/verification-keyring.keys](gradle/verification-keyring.keys) holding the keys; a jar that is unsigned or whose
 key no key server has is pinned by its SHA-256 instead. `jdkBuildVersion` in [gradle.properties](gradle.properties)
 names the JDK that builds the jars, the newest release in GA, and
 [gradle/gradle-daemon-jvm.properties](gradle/gradle-daemon-jvm.properties) the JDK that runs Gradle, the newest LTS
-release. Renovate opens pull requests that move all of them. On the first day of each month, the
+release. Renovate opens pull requests that move all of them from the 24th to the 28th of each month, and one for a new
+Java major as soon as it reaches GA. A pull request merges itself once the `CI Gate` check passes, except a major update
+other than Java or the actions GitHub publishes, and an update of [docker/gensrc.Dockerfile](docker/gensrc.Dockerfile),
+which wait for review. A security fix gets its pull request at once. On the first day of each month, the
 [Build](.github/workflows/build.yml) workflow builds the jars and publishes them as a release tagged `vYYYY.MM.DD`, or
 `vYYYY.MM.DD.2` and so on for a later release on the same day. The build is reproducible, so the workflow skips the
 release when the latest release has the same jars with the same SHA-256 digests.

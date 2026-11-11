@@ -1,6 +1,20 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "extends": ["config:best-practices"],
+  "ignorePresets": ["docker:pinDigests"],
+  "description": "Open update PRs from the 24th to the 28th of each month, a few days before the release on the 1st, and automerge the non-major ones once the CI Gate check passes",
+  "schedule": ["* * 24-28 * *"],
+  "prHourlyLimit": 0,
+  "minimumReleaseAge": "7 days",
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "automergeType": "pr",
+  "platformAutomerge": true,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null,
+    "prCreation": "immediate"
+  },
   "customManagers": [
     {
       "customType": "regex",
@@ -38,6 +52,42 @@
       "description": "An LTS release ships every two years: 21, 25, and every fourth major after them",
       "matchDepNames": ["java-lts"],
       "allowedVersions": "/^(25|29|33|37|41|45|49)(\\.|$)/"
+    },
+    {
+      "description": "Automerge non-major updates after the CI Gate check passes",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "Open a PR for a new Java major as soon as it reaches GA, so the next release carries its API, and automerge it: every job runs Gradle on java-lts, the build runs on jdkBuildVersion, and NullAway checks the stubs with its javac",
+      "matchDepNames": ["java-jdk", "java-lts"],
+      "schedule": ["at any time"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge major updates of the actions GitHub publishes; the workflow runs each of them on the PR",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/**", "github/**"],
+      "matchUpdateTypes": ["major"],
+      "automerge": true
+    },
+    {
+      "description": "Leave updates of docker/gensrc.Dockerfile for review: CI builds without Docker, so a green CI Gate says nothing about the image",
+      "matchManagers": ["dockerfile"],
+      "automerge": false
+    },
+    {
+      "description": "Group non-major updates of GitHub Actions into one PR",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Group major updates of the actions GitHub publishes into one PR, apart from other majors: Renovate automerges a group only when every update in it automerges",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/**", "github/**"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "major GitHub-published Actions"
     }
   ]
 }
