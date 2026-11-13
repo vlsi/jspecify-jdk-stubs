@@ -9,6 +9,11 @@ plugins {
 val jdkBuildVersion = providers.gradleProperty("jdkBuildVersion").map { JavaLanguageVersion.of(it) }
 val jdkTestVersion = providers.gradleProperty("jdkTestVersion").map { JavaLanguageVersion.of(it) }
     .orElse(jdkBuildVersion)
+// The next Java release, still in development: its early-access jar comes from an early-access
+// build of it, so it moves on when Renovate moves jdkBuildVersion at the GA of the next release.
+val jdkEarlyAccessVersion = jdkBuildVersion.map { JavaLanguageVersion.of(it.asInt() + 1) }
+// Inside a TaskContainer extension, javaToolchains names the task that lists the toolchains.
+val toolchains: JavaToolchainService = javaToolchains
 
 java {
     toolchain.languageVersion = jdkBuildVersion
@@ -91,9 +96,22 @@ fun TaskContainer.registerHeaderCompile(name: String, output: Provider<RegularFi
         }
     }
 
-fun TaskContainer.registerReleaseStubs(name: String, headers: FileCollection, outputDir: Provider<Directory>) =
+fun TaskContainer.registerReleaseStubs(
+    name: String,
+    headers: FileCollection,
+    outputDir: Provider<Directory>,
+    earlyAccess: Boolean = false,
+) =
     register<JavaExec>(name) {
-        description = "Writes one stubs jar per selected Java release into ${outputDir.get().asFile.name}."
+        description = if (earlyAccess) {
+            "Writes the early-access stubs jar of the release of the early-access JDK into ${outputDir.get().asFile.name}."
+        } else {
+            "Writes one stubs jar per selected Java release into ${outputDir.get().asFile.name}."
+        }
+        if (earlyAccess) {
+            // The API comes from the lib/ct.sym of the JDK that runs ReleaseStubs.
+            javaLauncher = toolchains.launcherFor { languageVersion = jdkEarlyAccessVersion }
+        }
         classpath = sourceSets.main.get().runtimeClasspath
         mainClass = "ReleaseStubs"
         inputs.files(headers)
@@ -110,7 +128,7 @@ fun TaskContainer.registerReleaseStubs(name: String, headers: FileCollection, ou
                 "--legal-dir", jdkSrcDir.path,
                 "--output-dir", outputDir.get().asFile.path,
                 "--today", date.get(),
-            )
+            ) + if (earlyAccess) listOf("--early-access") else listOf()
         }
     }
 
@@ -120,8 +138,12 @@ fun TaskContainer.registerReproducibilityCheck(
     first: TaskProvider<*>,
     second: TaskProvider<*>,
     vararg extraArgs: Provider<String>,
+    javaVersion: Provider<JavaLanguageVersion>? = null,
 ) =
     register<JavaExec>(name) {
+        if (javaVersion != null) {
+            javaLauncher = toolchains.launcherFor { languageVersion = javaVersion }
+        }
         classpath = sourceSets.main.get().runtimeClasspath
         this.mainClass = mainClass
         val firstOutput = files(first)
@@ -150,10 +172,37 @@ val checkReleaseStubs = tasks.registerReproducibilityCheck(
 )
 checkReleaseStubs { description = "Checks the stubs jars and that a second run wrote the same bytes." }
 
+// The early-access jar takes its API from the ct.sym of the early-access JDK. The jars of the
+// releases in GA take theirs from the build JDK only, so an early-access build cannot change them.
+val releaseStubsEarlyAccess = tasks.registerReleaseStubs(
+    "releaseStubsEarlyAccess", files(headerCompile), layout.buildDirectory.dir("early-access"), earlyAccess = true,
+)
+val releaseStubsEarlyAccessRerun = tasks.registerReleaseStubs(
+    "releaseStubsEarlyAccessRerun", files(headerCompile), layout.buildDirectory.dir("rerun/early-access"),
+    earlyAccess = true,
+)
+val checkReleaseStubsEarlyAccess = tasks.registerReproducibilityCheck(
+    "checkReleaseStubsEarlyAccess", "ReleaseStubsTest", releaseStubsEarlyAccess, releaseStubsEarlyAccessRerun,
+    today, jdkSrc.map { it.asFile.path }, provider { "--early-access" },
+    javaVersion = jdkEarlyAccessVersion,
+)
+checkReleaseStubsEarlyAccess {
+    description = "Checks the early-access stubs jar and that a second run wrote the same bytes."
+}
+
 tasks.register("stubs") {
     group = LifecycleBasePlugin.BUILD_GROUP
     description = "Builds build/out/jspecify-jdk-stubs-jdk<N>.jar and checks that the build is reproducible."
     dependsOn(releaseStubs, checkHeaders, checkReleaseStubs)
+}
+
+// Not part of check: it needs an early-access JDK, which Gradle cannot download, and a problem with
+// the early-access build must not hold back the jars of the releases in GA.
+tasks.register("earlyAccessStubs") {
+    group = LifecycleBasePlugin.BUILD_GROUP
+    description = "Builds build/early-access/jspecify-jdk-stubs-jdk<N>-ea.jar, where N is jdkBuildVersion + 1," +
+        " and checks that the build is reproducible."
+    dependsOn(releaseStubsEarlyAccess, checkHeaders, checkReleaseStubsEarlyAccess)
 }
 
 // -PstubsDir tests the jars of an earlier build, such as the CI artifact, instead of building them.
@@ -171,20 +220,36 @@ testing {
             targets.configureEach {
                 testTask.configure {
                     description = "Compiles code that calls the JDK with NullAway over each stubs jar."
-                    javaLauncher = javaToolchains.launcherFor { languageVersion = jdkTestVersion }
-                    inputs.files(stubsDir).withPathSensitivity(PathSensitivity.NAME_ONLY)
-                    val stubsJars = stubsDir
-                    jvmArgumentProviders.add { listOf("-DstubsDir=${stubsJars.singleFile}") }
-                    // Error Prone runs inside javac and reaches its internals.
-                    jvmArgs(
-                        listOf("api", "code", "comp", "file", "main", "model", "parser", "processing", "tree", "util")
-                            .map { "--add-exports=jdk.compiler/com.sun.tools.javac.$it=ALL-UNNAMED" },
-                    )
-                    jvmArgs("--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED")
+                    checkStubs(stubsDir, jdkTestVersion)
                 }
             }
         }
     }
+}
+
+/** Runs StubsNullAwayTest over the jars in [stubsJars] with javac of [jdk]. */
+fun Test.checkStubs(stubsJars: FileCollection, jdk: Provider<JavaLanguageVersion>) {
+    javaLauncher = javaToolchains.launcherFor { languageVersion = jdk }
+    inputs.files(stubsJars).withPathSensitivity(PathSensitivity.NAME_ONLY)
+    jvmArgumentProviders.add { listOf("-DstubsDir=${stubsJars.singleFile}") }
+    // Error Prone runs inside javac and reaches its internals.
+    jvmArgs(
+        listOf("api", "code", "comp", "file", "main", "model", "parser", "processing", "tree", "util")
+            .map { "--add-exports=jdk.compiler/com.sun.tools.javac.$it=ALL-UNNAMED" },
+    )
+    jvmArgs("--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED")
+}
+
+val stubsTestSourceSet = sourceSets.named("stubsTest")
+
+tasks.register<Test>("earlyAccessStubsTest") {
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    description = "Compiles code that calls the JDK with NullAway over the early-access stubs jar, with javac" +
+        " of the early-access JDK."
+    testClassesDirs = stubsTestSourceSet.get().output.classesDirs
+    classpath = stubsTestSourceSet.get().runtimeClasspath
+    useJUnitPlatform()
+    checkStubs(files(releaseStubsEarlyAccess), jdkEarlyAccessVersion)
 }
 
 tasks.named<JavaCompile>("compileStubsTestJava") {

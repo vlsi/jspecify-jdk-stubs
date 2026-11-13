@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.TreeMap;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -31,33 +30,37 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * NullAway reads the JSpecify annotations of every stubs jar in {@code -DstubsDir} when the jar is
- * put in front of the platform classes the way the README says: {@code --patch-module java.base}
- * from release 9 on, and {@code -bootclasspath} for release 8. A release newer than the JDK that
- * runs the test is skipped, because its javac cannot compile for it.
+ * NullAway reads the JSpecify annotations of every stubs jar in {@code -DstubsDir}, early-access
+ * jars included, when the jar is put in front of the platform classes the way the README says:
+ * {@code --patch-module java.base} from release 9 on, and {@code -bootclasspath} for release 8. A
+ * release newer than the JDK that runs the test is skipped, because its javac cannot compile for
+ * it.
  */
 class StubsNullAwayTest {
-  private static final Pattern JAR_NAME = Pattern.compile("jspecify-jdk-stubs-jdk(\\d+)\\.jar");
+  private static final Pattern JAR_NAME = Pattern.compile("jspecify-jdk-stubs-jdk(\\d+)(?:-ea)?\\.jar");
 
   @TempDir static Path tempDir;
 
   static Stream<Arguments> stubsJars() throws IOException {
     var dir = Path.of(Objects.requireNonNull(
         System.getProperty("stubsDir"), "-DstubsDir must name the directory with the stubs jars"));
-    var jars = new TreeMap<Integer, Path>();
+    // A directory may hold both jspecify-jdk-stubs-jdk<N>.jar and jspecify-jdk-stubs-jdk<N>-ea.jar,
+    // so each jar is a case of its own rather than one per release.
+    var jars = new ArrayList<Arguments>();
     try (var files = Files.list(dir)) {
-      for (var jar : files.toList()) {
-        var matcher = JAR_NAME.matcher(jar.getFileName().toString());
+      for (var jar : files.sorted().toList()) {
+        var name = jar.getFileName().toString();
+        var matcher = JAR_NAME.matcher(name);
         if (matcher.matches()) {
-          jars.put(Integer.parseInt(matcher.group(1)), jar);
+          jars.add(arguments(Integer.parseInt(matcher.group(1)), named(name, jar)));
         }
       }
     }
     if (jars.isEmpty()) {
-      throw new IllegalStateException("No jspecify-jdk-stubs-jdk<N>.jar in " + dir);
+      throw new IllegalStateException(
+          "No jspecify-jdk-stubs-jdk<N>.jar or jspecify-jdk-stubs-jdk<N>-ea.jar in " + dir);
     }
-    return jars.entrySet().stream()
-        .map(e -> arguments(e.getKey(), named(e.getValue().getFileName().toString(), e.getValue())));
+    return jars.stream();
   }
 
   @ParameterizedTest

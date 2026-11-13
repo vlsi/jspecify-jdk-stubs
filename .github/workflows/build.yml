@@ -19,6 +19,8 @@ jobs:
     outputs:
       gradle-jdk: ${{ steps.jdks.outputs.gradle }}
       test-jdks: ${{ steps.jdks.outputs.test }}
+      early-access: ${{ steps.early-access.outcome }}
+      early-access-jdk: ${{ steps.early-access-jdk.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,7 +28,7 @@ jobs:
       # gradle.properties names the JDK that builds the stubs, whose lib/ct.sym has to cover the
       # newest release in GA, and gradle-daemon-jvm.properties the JDK that runs Gradle. The stubs
       # are tested with javac of every LTS release from 21, the oldest Error Prone runs on, and of
-      # the build JDK.
+      # the build JDK. The early-access jar is for the release after the build JDK.
       - name: Read the JDK versions
         id: jdks
         run: |
@@ -37,9 +39,21 @@ jobs:
           test+=("$build")
           {
             echo "build=$build"
+            echo "early-access=$((build + 1))"
             echo "gradle=$gradle"
             echo "test=$(jq --null-input --compact-output '$ARGS.positional' --args "${test[@]}")"
           } >> "$GITHUB_OUTPUT"
+      # The newest early-access build on every run. It comes before the other JDKs, because
+      # setup-java points JAVA_HOME, which runs Gradle, at the JDK it installs last. A failure here
+      # or in the early-access steps below leaves the jars of the releases in GA and their release
+      # as they are.
+      - name: Set up JDK ${{ steps.jdks.outputs.early-access }}-ea
+        id: early-access-jdk
+        continue-on-error: true
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.jdks.outputs.early-access }}-ea
       - name: Set up JDK ${{ steps.jdks.outputs.build }} and ${{ steps.jdks.outputs.gradle }}
         uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
@@ -65,12 +79,45 @@ jobs:
           name: jspecify-jdk-stubs
           path: build/out/jspecify-jdk-stubs-jdk*.jar
           if-no-files-found: error
+      # Builds the early-access jar from the ct.sym of the early-access JDK, and runs NullAway over
+      # it with javac of that JDK.
+      - name: Build and test the early-access stubs
+        id: early-access
+        if: steps.early-access-jdk.outcome == 'success'
+        continue-on-error: true
+        env:
+          BUILD_JDK: ${{ steps.jdks.outputs.build }}
+          EARLY_ACCESS_JDK: ${{ steps.jdks.outputs.early-access }}
+        run: >-
+          ./gradlew --quiet earlyAccessStubs earlyAccessStubsTest
+          "-Porg.gradle.java.installations.fromEnv=JAVA_HOME_${BUILD_JDK}_X64,JAVA_HOME_${EARLY_ACCESS_JDK}_X64"
+          -Porg.gradle.java.installations.auto-download=false
+      - name: Warn that the early-access jar is missing
+        if: steps.early-access.outcome != 'success'
+        run: >-
+          echo "::warning title=No early-access jar::Setting up JDK ${{ steps.jdks.outputs.early-access }}-ea
+          ended with ${{ steps.early-access-jdk.outcome }}, and building and testing the early-access stubs
+          with ${{ steps.early-access.outcome }}, so no jspecify-jdk-stubs-jdk${{ steps.jdks.outputs.early-access }}-ea.jar
+          is built; see the logs of these steps"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.early-access.outcome == 'success'
+        with:
+          name: jspecify-jdk-stubs-early-access
+          path: build/early-access/jspecify-jdk-stubs-jdk*-ea.jar
+          if-no-files-found: error
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-logs
           path: build/*.log
+      - name: Upload early-access test reports
+        if: steps.early-access.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports-early-access
+          path: build/reports/tests
+          if-no-files-found: ignore
 
   test:
     name: NullAway on JDK ${{ matrix.jdk }}
@@ -138,7 +185,13 @@ jobs:
         with:
           name: jspecify-jdk-stubs
           path: build/out
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.build.outputs.early-access == 'success'
+        with:
+          name: jspecify-jdk-stubs-early-access
+          path: build/out
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          EARLY_ACCESS_JDK: ${{ needs.build.outputs.early-access-jdk }}
         run: scripts/release.sh
