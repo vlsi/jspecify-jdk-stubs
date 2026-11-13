@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -67,11 +68,14 @@ import java.util.zip.ZipOutputStream;
  *   --headers path/to/jspecify-jdk-headers.jar \
  *   --legal-dir path/to/jspecify-jdk \
  *   --output-dir path/to/out \
- *   [--today yyyy-mm-dd]
+ *   [--today yyyy-mm-dd] [--early-access]
  * }</pre>
  *
  * <p>The API comes from the {@code lib/ct.sym} of the running JDK. {@code --today} defaults to the
  * current UTC date, and the releases are the ones {@link #selectReleases} returns for that date.
+ * With {@code --early-access}, the only release is that of the running JDK, which has to be newer
+ * than every release {@link #selectReleases} returns (see {@link #earlyAccessRelease}), and the jar
+ * is named by {@link #earlyAccessJarName}.
  * {@code --legal-dir} is the root of the jspecify/jdk checkout, and each jar carries its {@link
  * #LEGAL_FILES} under {@code META-INF/}, because the stubs are derived from the OpenJDK sources.
  */
@@ -109,6 +113,7 @@ public final class ReleaseStubs {
     Path legalDir = null;
     var ctSym = Path.of(System.getProperty("java.home"), "lib", "ct.sym");
     var today = LocalDate.now(ZoneOffset.UTC);
+    boolean earlyAccess = false;
 
     for (int i = 0; i < args.length; i++) {
       switch (args[i]) {
@@ -116,13 +121,14 @@ public final class ReleaseStubs {
         case "--legal-dir" -> legalDir = Path.of(requireArg(args, ++i, "--legal-dir"));
         case "--output-dir" -> outputDir = Path.of(requireArg(args, ++i, "--output-dir"));
         case "--today" -> today = LocalDate.parse(requireArg(args, ++i, "--today"));
+        case "--early-access" -> earlyAccess = true;
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }
     if (headersJar == null || legalDir == null || outputDir == null) {
       throw new IllegalArgumentException(
           "Usage: java ReleaseStubs.java --headers <headers.jar> --legal-dir <jspecify-jdk-dir>"
-              + " --output-dir <dir> [--today <yyyy-mm-dd>]");
+              + " --output-dir <dir> [--today <yyyy-mm-dd>] [--early-access]");
     }
 
     var headers = readClasses(headersJar);
@@ -132,7 +138,7 @@ public final class ReleaseStubs {
     }
     try (var ctSymZip = new ZipFile(ctSym.toFile())) {
       var api = indexCtSym(ctSymZip);
-      var releases = selectReleases(today);
+      var releases = earlyAccess ? List.of(requireEarlyAccess(today)) : selectReleases(today);
       var missing = releases.stream().filter(r -> !api.containsKey(r)).toList();
       if (!missing.isEmpty()) {
         throw new IllegalStateException(
@@ -152,7 +158,9 @@ public final class ReleaseStubs {
       }
       createDirectories(outputDir);
       for (int release : releases) {
-        writeReleaseJar(release, headers, api.get(release), ctSymZip, legalFiles, outputDir);
+        var jarName = earlyAccess ? earlyAccessJarName(release) : jarName(release);
+        writeReleaseJar(
+            release, headers, api.get(release), ctSymZip, legalFiles, outputDir.resolve(jarName));
       }
     }
   }
@@ -178,6 +186,38 @@ public final class ReleaseStubs {
       }
     }
     return selected;
+  }
+
+  /**
+   * Returns the release of a JDK of feature version {@code jdk} when that release gets an
+   * early-access jar on {@code today}, or an empty result when it does not.
+   *
+   * <p>A release gets an early-access jar while it is newer than every release {@link
+   * #selectReleases} returns for {@code today}, that is, up to the last day of its GA month. JDK
+   * 28, due in March 2027, gets one until March 31, 2027, and a regular jar from April 1, 2027.
+   */
+  static OptionalInt earlyAccessRelease(LocalDate today, int jdk) {
+    return jdk > selectReleases(today).getLast() ? OptionalInt.of(jdk) : OptionalInt.empty();
+  }
+
+  /** Returns the release of the running JDK, or throws when it gets no early-access jar today. */
+  private static int requireEarlyAccess(LocalDate today) {
+    int jdk = Runtime.version().feature();
+    return earlyAccessRelease(today, jdk)
+        .orElseThrow(
+            () ->
+                new IllegalStateException(
+                    "--early-access needs a JDK newer than every release that gets a regular jar"
+                        + " on "
+                        + today
+                        + ", "
+                        + selectReleases(today)
+                        + ", but runs on JDK "
+                        + Runtime.version()
+                        + ". The early-access JDK is jdkBuildVersion + 1, so set"
+                        + " jdkBuildVersion in gradle.properties to "
+                        + selectReleases(today).getLast()
+                        + "."));
   }
 
   private static boolean isLts(int release) {
@@ -233,9 +273,8 @@ public final class ReleaseStubs {
       Map<String, ZipEntry> api,
       ZipFile ctSym,
       SortedMap<String, byte[]> legalFiles,
-      Path outputDir)
+      Path jarPath)
       throws IOException {
-    var jarPath = outputDir.resolve(jarName(release));
     var stats = new Stats();
     try (var fileOut = newOutputStream(jarPath);
         var bufferedOut = new BufferedOutputStream(fileOut);
@@ -279,6 +318,14 @@ public final class ReleaseStubs {
 
   static String jarName(int release) {
     return "jspecify-jdk-stubs-jdk" + release + ".jar";
+  }
+
+  /**
+   * Returns the name of the jar of {@code release} built from a JDK early-access build, whose API
+   * may still change before GA.
+   */
+  static String earlyAccessJarName(int release) {
+    return "jspecify-jdk-stubs-jdk" + release + "-ea.jar";
   }
 
   /**

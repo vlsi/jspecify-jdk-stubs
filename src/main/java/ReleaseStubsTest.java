@@ -27,8 +27,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.SortedMap;
 import java.util.TreeSet;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -36,7 +38,9 @@ import java.util.zip.ZipFile;
 /**
  * Checks the jars that {@code ReleaseStubs.java} writes against the {@code ct.sym} file of the
  * running JDK, which has to be the JDK that wrote them, and against the license files of
- * jspecify/jdk. Reports every failed check, not only the first.
+ * jspecify/jdk. Reports every failed check, not only the first. With {@code --early-access}, it
+ * checks the early-access jar that {@code ReleaseStubs.java --early-access} writes instead of the
+ * jars of the releases in GA.
  */
 public final class ReleaseStubsTest {
   private static final String NULLABLE = "Lorg/jspecify/annotations/Nullable;";
@@ -46,10 +50,11 @@ public final class ReleaseStubsTest {
   private static final List<String> failures = new ArrayList<>();
 
   public static void main(String[] args) throws Exception {
-    if (args.length != 4) {
+    boolean earlyAccess = args.length == 5 && args[4].equals("--early-access");
+    if (args.length != 4 && !earlyAccess) {
       throw new IllegalArgumentException(
           "Usage: java ReleaseStubsTest.java <stubs-dir> <second-run-stubs-dir> <yyyy-mm-dd>"
-              + " <jspecify-jdk-dir>");
+              + " <jspecify-jdk-dir> [--early-access]");
     }
     var stubsDir = Path.of(args[0]);
     var rerunDir = Path.of(args[1]);
@@ -69,15 +74,42 @@ public final class ReleaseStubsTest {
     selectReleases(
         "an LTS release past its first year", "2029-11-11", List.of(8, 11, 17, 21, 25, 29, 32, 33));
 
+    earlyAccessRelease(
+        "JDK 28 while JDK 27 is the newest release", "2026-11-13", 28, OptionalInt.of(28));
+    earlyAccessRelease("JDK 27 after its GA month", "2026-11-13", 27, OptionalInt.empty());
+    earlyAccessRelease(
+        "JDK 28 on the last day of its GA month", "2027-03-31", 28, OptionalInt.of(28));
+    earlyAccessRelease(
+        "JDK 28 on the first day after its GA month", "2027-04-01", 28, OptionalInt.empty());
+    earlyAccessRelease(
+        "JDK 29 on the first day after the GA month of JDK 28",
+        "2027-04-01",
+        29,
+        OptionalInt.of(29));
+
     sameTypes("Ljava/util/List<*>;", "Ljava/util/List<+Ljava/lang/Object;>;", true);
     sameTypes("Ljava/util/List<*>;", "Ljava/util/List<+Ljava/lang/String;>;", false);
     sameTypes("Ljava/util/List<*>;", "Ljava/util/List<-Ljava/lang/Object;>;", false);
     sameTypes("Ljava/util/List<+Ljava/lang/Object;>;", "Ljava/util/List<*>;", true);
     stubDeclaresTheWildcardSpellingOfTheHeader();
 
-    var releases = ReleaseStubs.selectReleases(today);
+    var releases =
+        earlyAccess
+            ? List.of(
+                ReleaseStubs.earlyAccessRelease(today, Runtime.version().feature())
+                    .orElseThrow(
+                        () ->
+                            new IllegalStateException(
+                                "--early-access needs a JDK newer than every release with a"
+                                    + " regular jar on "
+                                    + today
+                                    + ", but runs on JDK "
+                                    + Runtime.version())))
+            : ReleaseStubs.selectReleases(today);
+    Function<Integer, String> jarNameOf =
+        earlyAccess ? ReleaseStubs::earlyAccessJarName : ReleaseStubs::jarName;
     var expectedJars = new TreeSet<String>();
-    releases.forEach(r -> expectedJars.add(ReleaseStubs.jarName(r)));
+    releases.forEach(r -> expectedJars.add(jarNameOf.apply(r)));
     var actualJars = new TreeSet<String>();
     try (var files = Files.list(stubsDir)) {
       files.forEach(f -> actualJars.add(f.getFileName().toString()));
@@ -93,7 +125,7 @@ public final class ReleaseStubsTest {
     try (var ctSymZip = new ZipFile(ctSym.toFile())) {
       var api = ReleaseStubs.indexCtSym(ctSymZip);
       for (int release : releases) {
-        var jarPath = stubsDir.resolve(ReleaseStubs.jarName(release));
+        var jarPath = stubsDir.resolve(jarNameOf.apply(release));
         checkLegalFiles(jarPath, legalDir);
         var classes = ReleaseStubs.readClasses(jarPath);
         for (var entry : classes.entrySet()) {
@@ -118,6 +150,14 @@ public final class ReleaseStubsTest {
         expected,
         ReleaseStubs.selectReleases(LocalDate.parse(date)),
         "selectReleases(" + date + "), " + day);
+  }
+
+  private static void earlyAccessRelease(
+      String jdk, String date, int feature, OptionalInt expected) {
+    checkEquals(
+        expected,
+        ReleaseStubs.earlyAccessRelease(LocalDate.parse(date), feature),
+        "earlyAccessRelease(" + date + ", " + feature + "), " + jdk);
   }
 
   private static void sameTypes(String a, String b, boolean expected) {
