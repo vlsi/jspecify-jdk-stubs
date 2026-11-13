@@ -1,5 +1,7 @@
 import static java.lang.classfile.TypeAnnotation.TargetType.CLASS_TYPE_PARAMETER_BOUND;
 import static java.lang.classfile.TypeAnnotation.TargetType.METHOD_RETURN;
+import static java.lang.classfile.TypeAnnotation.TypePathComponent.Kind.TYPE_ARGUMENT;
+import static java.lang.constant.ConstantDescs.CD_void;
 import static java.nio.file.Files.mismatch;
 
 import java.io.IOException;
@@ -10,7 +12,14 @@ import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.TypeAnnotation;
+import java.lang.classfile.TypeAnnotation.FormalParameterTarget;
 import java.lang.classfile.TypeAnnotation.SupertypeTarget;
+import java.lang.classfile.TypeAnnotation.TargetInfo;
+import java.lang.classfile.TypeAnnotation.TypePathComponent;
+import java.lang.classfile.attribute.RuntimeVisibleTypeAnnotationsAttribute;
+import java.lang.classfile.attribute.SignatureAttribute;
+import java.lang.constant.ClassDesc;
+import java.lang.constant.MethodTypeDesc;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
@@ -60,6 +69,12 @@ public final class ReleaseStubsTest {
     selectReleases(
         "an LTS release past its first year", "2029-11-11", List.of(8, 11, 17, 21, 25, 29, 32, 33));
 
+    sameTypes("Ljava/util/List<*>;", "Ljava/util/List<+Ljava/lang/Object;>;", true);
+    sameTypes("Ljava/util/List<*>;", "Ljava/util/List<+Ljava/lang/String;>;", false);
+    sameTypes("Ljava/util/List<*>;", "Ljava/util/List<-Ljava/lang/Object;>;", false);
+    sameTypes("Ljava/util/List<+Ljava/lang/Object;>;", "Ljava/util/List<*>;", true);
+    stubDeclaresTheWildcardSpellingOfTheHeader();
+
     var releases = ReleaseStubs.selectReleases(today);
     var expectedJars = new TreeSet<String>();
     releases.forEach(r -> expectedJars.add(ReleaseStubs.jarName(r)));
@@ -103,6 +118,139 @@ public final class ReleaseStubsTest {
         expected,
         ReleaseStubs.selectReleases(LocalDate.parse(date)),
         "selectReleases(" + date + "), " + day);
+  }
+
+  private static void sameTypes(String a, String b, boolean expected) {
+    checkEquals(expected, ReleaseStubs.sameTypes(a, b), "sameTypes(" + a + ", " + b + ")");
+  }
+
+  /**
+   * Each member spells its wildcard one way in the headers class and the other way in the {@code
+   * ct.sym} class. For {@code m} and {@code v}, the headers class annotates the bound of {@code ?
+   * extends Object}, a position that the {@code ?} of {@code ct.sym} lacks.
+   */
+  private static void stubDeclaresTheWildcardSpellingOfTheHeader() {
+    var header =
+        syntheticClass(
+            "Ljava/util/List<*>;",
+            "()Ljava/util/List<+Ljava/lang/Object;>;",
+            "([Ljava/util/List<+Ljava/lang/Object;>;)V",
+            true);
+    var sig =
+        syntheticClass(
+            "Ljava/util/List<+Ljava/lang/Object;>;",
+            "()Ljava/util/List<*>;",
+            "([Ljava/util/List<*>;)V",
+            false);
+    var stub = ClassFile.of().parse(ReleaseStubs.stub(sig, header, 21, new ReleaseStubs.Stats()));
+
+    var field = stub.fields().getFirst();
+    checkEquals(List.of("Ljava/util/List<*>;"), signatures(field), "Signature attributes of f");
+    check(
+        hasTypeAnnotation(field, NULLABLE, t -> describePath(t).equals("[TYPE_ARGUMENT 0]")),
+        "f has no @Nullable on its type argument");
+
+    var method = method(stub, "m");
+    checkEquals(
+        List.of("()Ljava/util/List<+Ljava/lang/Object;>;"),
+        signatures(method),
+        "Signature attributes of m");
+    check(
+        hasTypeAnnotation(
+            method, NULLABLE, t -> describePath(t).equals("[TYPE_ARGUMENT 0, WILDCARD 0]")),
+        "m has no @Nullable on the bound of its type argument");
+
+    var varargs = method(stub, "v");
+    checkEquals(
+        List.of("([Ljava/util/List<*>;)V"),
+        signatures(varargs),
+        "Signature attributes of varargs v; javac 8, 11, and 17 warn about unchecked generic array"
+            + " creation for List<? extends Object>... and not for List<?>...");
+    check(hasDeclarationAnnotation(varargs, NULL_UNMARKED), "v has no @NullUnmarked");
+  }
+
+  /**
+   * Returns a class with a field {@code f} of type {@code List}, a method {@code m()} returning
+   * {@code List}, and a varargs method {@code v(List...)}, with the given generic signatures. The
+   * annotated class carries {@code @Nullable} on the {@code List} type argument of {@code f}, and
+   * on the bound of that type argument for {@code m} and {@code v}.
+   */
+  private static ClassModel syntheticClass(
+      String fieldSignature, String methodSignature, String varargsSignature, boolean annotated) {
+    var list = ClassDesc.of("java.util.List");
+    var nullable = Annotation.of(ClassDesc.ofDescriptor(NULLABLE));
+    var bytes =
+        ClassFile.of()
+            .build(
+                ClassDesc.of("Synthetic"),
+                clb -> {
+                  clb.withField(
+                      "f",
+                      list,
+                      fb -> {
+                        fb.with(SignatureAttribute.of(fb.constantPool().utf8Entry(fieldSignature)));
+                        if (annotated) {
+                          fb.with(
+                              RuntimeVisibleTypeAnnotationsAttribute.of(
+                                  TypeAnnotation.of(
+                                      TargetInfo.ofField(),
+                                      List.of(TypePathComponent.of(TYPE_ARGUMENT, 0)),
+                                      nullable)));
+                        }
+                      });
+                  clb.withMethod(
+                      "m",
+                      MethodTypeDesc.of(list),
+                      ClassFile.ACC_PUBLIC | ClassFile.ACC_ABSTRACT,
+                      mb -> {
+                        mb.with(
+                            SignatureAttribute.of(mb.constantPool().utf8Entry(methodSignature)));
+                        if (annotated) {
+                          mb.with(
+                              RuntimeVisibleTypeAnnotationsAttribute.of(
+                                  TypeAnnotation.of(
+                                      TargetInfo.ofMethodReturn(),
+                                      List.of(
+                                          TypePathComponent.of(TYPE_ARGUMENT, 0),
+                                          TypePathComponent.WILDCARD),
+                                      nullable)));
+                        }
+                      });
+                  clb.withMethod(
+                      "v",
+                      MethodTypeDesc.of(CD_void, list.arrayType()),
+                      ClassFile.ACC_PUBLIC | ClassFile.ACC_ABSTRACT | ClassFile.ACC_VARARGS,
+                      mb -> {
+                        mb.with(
+                            SignatureAttribute.of(mb.constantPool().utf8Entry(varargsSignature)));
+                        if (annotated) {
+                          mb.with(
+                              RuntimeVisibleTypeAnnotationsAttribute.of(
+                                  TypeAnnotation.of(
+                                      TargetInfo.ofMethodFormalParameter(0),
+                                      List.of(
+                                          TypePathComponent.ARRAY,
+                                          TypePathComponent.of(TYPE_ARGUMENT, 0),
+                                          TypePathComponent.WILDCARD),
+                                      nullable)));
+                        }
+                      });
+                });
+    return ClassFile.of().parse(bytes);
+  }
+
+  private static MethodModel method(ClassModel model, String name) {
+    return model.methods().stream()
+        .filter(m -> m.methodName().equalsString(name))
+        .findFirst()
+        .orElseThrow();
+  }
+
+  private static List<String> signatures(AttributedElement element) {
+    return element.attributes().stream()
+        .filter(a -> a instanceof SignatureAttribute)
+        .map(a -> ((SignatureAttribute) a).signature().stringValue())
+        .toList();
   }
 
   /**
@@ -170,7 +318,7 @@ public final class ReleaseStubsTest {
               + " flags "
               + method.flags().flagsMask()
               + " signature "
-              + ReleaseStubs.signature(method)
+              + sameTypesForm(ReleaseStubs.signature(method))
               + " throws "
               + ReleaseStubs.exceptions(method));
     }
@@ -180,9 +328,18 @@ public final class ReleaseStubsTest {
               + " flags "
               + field.flags().flagsMask()
               + " signature "
-              + ReleaseStubs.signature(field));
+              + sameTypesForm(ReleaseStubs.signature(field)));
     }
     return members;
+  }
+
+  /**
+   * Returns {@code signature} with every {@code ? extends Object} written as {@code ?}, the one
+   * difference from {@code ct.sym} that a stub may declare (see {@code
+   * ReleaseStubs.headerSpelling}).
+   */
+  private static String sameTypesForm(String signature) {
+    return signature.replace("+Ljava/lang/Object;", "*");
   }
 
   private static void checkAnnotations(int release, SortedMap<String, ClassModel> classes) {
@@ -242,6 +399,49 @@ public final class ReleaseStubsTest {
           where + "Stream.generate(Supplier) has a @Nullable type annotation");
     }
 
+    // ct.sym declares the parameter as BiFunction<? super Object, ? super Object, ? extends
+    // Object>, and jspecify/jdk as BiFunction<? super Object, ? super @Nullable Object, ?>.
+    var compute =
+        method(
+            classes,
+            "java/security/Provider",
+            "compute(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;");
+    if (present(compute, where + "Provider.compute(Object, BiFunction)")) {
+      checkEquals(
+          "(Ljava/lang/Object;"
+              + "Ljava/util/function/BiFunction<-Ljava/lang/Object;-Ljava/lang/Object;*>;)"
+              + "Ljava/lang/Object;",
+          ReleaseStubs.signature(compute),
+          where + "Provider.compute(Object, BiFunction) signature");
+      check(
+          !hasDeclarationAnnotation(compute, NULL_UNMARKED),
+          where + "Provider.compute(Object, BiFunction) has @NullUnmarked");
+      check(
+          hasTypeAnnotation(compute, NULLABLE, t -> t.targetInfo().targetType() == METHOD_RETURN),
+          where + "Provider.compute(Object, BiFunction) has no @Nullable on its return type");
+      check(
+          hasTypeAnnotation(
+              compute,
+              NULLABLE,
+              t ->
+                  t.targetInfo() instanceof FormalParameterTarget p
+                      && p.formalParameterIndex() == 1
+                      && describePath(t).equals("[TYPE_ARGUMENT 1, WILDCARD 0]")),
+          where
+              + "Provider.compute(Object, BiFunction) has no @Nullable on the bound of the"
+              + " second type argument of its second parameter");
+    }
+
+    // ct.sym declares Enumeration<?>, and jspecify/jdk Enumeration<? extends Object>.
+    var propertyNames =
+        method(classes, "java/util/Properties", "propertyNames()Ljava/util/Enumeration;");
+    if (present(propertyNames, where + "Properties.propertyNames()")) {
+      checkEquals(
+          "()Ljava/util/Enumeration<+Ljava/lang/Object;>;",
+          ReleaseStubs.signature(propertyNames),
+          where + "Properties.propertyNames() signature");
+    }
+
     if (release == 8) {
       // Thread.stop(Throwable) was removed in JDK 11, so jspecify/jdk does not annotate it.
       var stop = method(classes, "java/lang/Thread", "stop(Ljava/lang/Throwable;)V");
@@ -292,6 +492,13 @@ public final class ReleaseStubsTest {
                 a.annotations().stream()
                     .anyMatch(ta -> is(ta.annotation(), descriptor) && target.test(ta)))
         .orElse(false);
+  }
+
+  private static String describePath(TypeAnnotation annotation) {
+    return annotation.targetPath().stream()
+        .map(c -> c.typePathKind() + " " + c.typeArgumentIndex())
+        .toList()
+        .toString();
   }
 
   private static boolean is(Annotation annotation, String descriptor) {

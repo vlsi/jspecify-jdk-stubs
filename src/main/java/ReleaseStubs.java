@@ -20,6 +20,7 @@ import java.lang.classfile.MethodTransform;
 import java.lang.classfile.TypeAnnotation;
 import java.lang.classfile.attribute.RuntimeVisibleAnnotationsAttribute;
 import java.lang.classfile.attribute.RuntimeVisibleTypeAnnotationsAttribute;
+import java.lang.classfile.attribute.SignatureAttribute;
 import java.lang.constant.ClassDesc;
 import java.lang.reflect.AccessFlag;
 import java.nio.file.Path;
@@ -50,11 +51,14 @@ import java.util.zip.ZipOutputStream;
  * <p>A class goes into the jar of release N when the headers jar has it and N's API has it. Each
  * stub declares exactly the members of N's API, and its class file version is that of N. It takes
  * the JSpecify annotations of a member from the headers jar only where the member's name,
- * descriptor, generic signature, and thrown exceptions are the same in both, because a type
- * annotation addresses a position in that signature. A method or constructor with no such match,
+ * descriptor, and thrown exceptions are the same in both and the stub declares the generic
+ * signature of the headers jar, because a type annotation addresses a position in that signature.
+ * The stub declares the signature of {@code ct.sym}, or that of the headers jar where the two
+ * differ only in writing a wildcard as {@code ?} or as {@code ? extends Object} and the member is
+ * not a varargs method (see {@link #headerSpelling}). A method or constructor with no such match,
  * one the JDK removed or changed after N, gets {@code @NullUnmarked}, so a checker treats it as
- * unannotated rather than non-null inside a {@code @NullMarked} class. A field with no match stays
- * unannotated, because {@code @NullUnmarked} does not apply to fields.
+ * unannotated rather than non-null inside a {@code @NullMarked} class. A field with no match
+ * stays unannotated, because {@code @NullUnmarked} does not apply to fields.
  *
  * <p>Usage:
  *
@@ -73,6 +77,7 @@ import java.util.zip.ZipOutputStream;
  */
 public final class ReleaseStubs {
   private static final String JSPECIFY_DESCRIPTOR_PREFIX = "Lorg/jspecify/annotations/";
+  private static final String EXTENDS_OBJECT = "+Ljava/lang/Object;";
   private static final ClassDesc NULL_UNMARKED =
       ClassDesc.of("org.jspecify.annotations.NullUnmarked");
 
@@ -280,7 +285,7 @@ public final class ReleaseStubs {
    * Returns {@code sig}, the API of a class in {@code release}, with the JSpecify annotations of
    * {@code header}, the same class compiled from jspecify/jdk.
    */
-  private static byte[] stub(ClassModel sig, ClassModel header, int release, Stats stats) {
+  static byte[] stub(ClassModel sig, ClassModel header, int release, Stats stats) {
     var headerMethods = byKey(header.methods(), ReleaseStubs::methodKey);
     var headerFields = byKey(header.fields(), ReleaseStubs::fieldKey);
     var classAnnotations = declarationAnnotations(sig, jspecifyAnnotations(header));
@@ -295,6 +300,8 @@ public final class ReleaseStubs {
                 RuntimeVisibleTypeAnnotationsAttribute _ -> {}
             case MethodModel method -> {
               var match = headerMethods.get(methodKey(method));
+              var spelling =
+                  match == null ? Optional.<String>empty() : headerSpelling(match, method);
               boolean matched = match != null && typeAnnotationsFit(match, method);
               boolean markUnmarked = !matched && !isSynthetic(method.flags());
               if (markUnmarked) {
@@ -314,12 +321,21 @@ public final class ReleaseStubs {
                       .andThen(
                           MethodTransform.endHandler(
                               mb -> {
+                                // The Signature attribute of the headers jar replaces that of
+                                // ct.sym: the builder keeps the last of the attributes that may
+                                // appear only once.
+                                spelling.ifPresent(
+                                    s ->
+                                        mb.with(
+                                            SignatureAttribute.of(mb.constantPool().utf8Entry(s))));
                                 declaration.ifPresent(mb::with);
                                 type.ifPresent(mb::with);
                               })));
             }
             case FieldModel field -> {
               var match = headerFields.get(fieldKey(field));
+              var spelling =
+                  match == null ? Optional.<String>empty() : headerSpelling(match, field);
               boolean matched = match != null && typeAnnotationsFit(match, field);
               if (!matched) {
                 stats.unmatchedFields++;
@@ -334,6 +350,13 @@ public final class ReleaseStubs {
                       .andThen(
                           FieldTransform.endHandler(
                               fb -> {
+                                // The Signature attribute of the headers jar replaces that of
+                                // ct.sym: the builder keeps the last of the attributes that may
+                                // appear only once.
+                                spelling.ifPresent(
+                                    s ->
+                                        fb.with(
+                                            SignatureAttribute.of(fb.constantPool().utf8Entry(s))));
                                 declaration.ifPresent(fb::with);
                                 type.ifPresent(fb::with);
                               })));
@@ -488,20 +511,53 @@ public final class ReleaseStubs {
 
   /**
    * Returns whether every JSpecify type annotation of {@code header} addresses the same type in
-   * {@code sig}: the generic signatures are equal, and so are the thrown exceptions where an
-   * annotation is on one of them. Without JSpecify type annotations, nothing has to be equal.
+   * the stub of {@code sig}: the stub declares the generic signature of {@code header} (see {@link
+   * #headerSpelling}), and the thrown exceptions are equal where an annotation is on one of them.
+   * Without JSpecify type annotations, nothing has to be equal.
    */
   private static boolean typeAnnotationsFit(AttributedElement header, AttributedElement sig) {
     var annotations = jspecifyTypeAnnotations(header);
     if (annotations.isEmpty()) {
       return true;
     }
-    if (!signature(header).equals(signature(sig))) {
+    var declared = headerSpelling(header, sig).orElse(signature(sig));
+    if (!signature(header).equals(declared)) {
       return false;
     }
     return annotations.stream()
             .noneMatch(a -> a.targetInfo() instanceof TypeAnnotation.ThrowsTarget)
         || exceptions(header).equals(exceptions(sig));
+  }
+
+  /**
+   * Returns the generic signature of {@code header}, a member of the headers jar, where the stub of
+   * {@code sig}, the member in {@code ct.sym}, declares it instead of the signature of {@code sig}.
+   * That is where the two differ only in writing a wildcard as {@code ?} or as {@code ? extends
+   * Object} (see {@link #sameTypes}). For javac both spellings are the same type, while in a
+   * {@code @NullMarked} scope the bound of {@code ?} is that of its type parameter and the {@code
+   * Object} of {@code ? extends Object} is non-null, so the stub keeps the spelling jspecify/jdk
+   * chose. A varargs method keeps the signature of {@code sig}, because javac 8, 11, and 17 warn
+   * about unchecked generic array creation for {@code List<? extends Object>...} and not for
+   * {@code List<?>...}.
+   */
+  static Optional<String> headerSpelling(AttributedElement header, AttributedElement sig) {
+    var headerSignature = signature(header);
+    var sigSignature = signature(sig);
+    boolean varargs = sig instanceof MethodModel m && m.flags().has(AccessFlag.VARARGS);
+    if (varargs
+        || headerSignature.equals(sigSignature)
+        || !sameTypes(headerSignature, sigSignature)) {
+      return Optional.empty();
+    }
+    return Optional.of(headerSignature);
+  }
+
+  /**
+   * Returns whether the generic signatures {@code a} and {@code b} are the same after writing every
+   * {@code ? extends Object} wildcard ({@code +Ljava/lang/Object;}) as {@code ?} ({@code *}).
+   */
+  static boolean sameTypes(String a, String b) {
+    return a.replace(EXTENDS_OBJECT, "*").equals(b.replace(EXTENDS_OBJECT, "*"));
   }
 
   static List<String> exceptions(AttributedElement method) {
@@ -519,7 +575,7 @@ public final class ReleaseStubs {
   }
 
   /** Counts of what a release jar could not carry over, for the summary line. */
-  private static final class Stats {
+  static final class Stats {
     int classes;
     int unmatchedMethods;
     int unmatchedFields;
